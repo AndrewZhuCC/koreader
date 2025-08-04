@@ -47,7 +47,7 @@ local OPDS = WidgetContainer:extend{
 
 function OPDS:init()
     -- Register OPDSPSE document provider
-    local OPDSPSEDocument = require("plugins/opds.koplugin/opdspse_document")
+    local OPDSPSEDocument = require("opdspse_document")
     OPDSPSEDocument:register(DocumentRegistry)
     
     self.opds_settings = LuaSettings:open(self.opds_settings_file)

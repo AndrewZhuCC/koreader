@@ -169,7 +169,7 @@ end
 
 function OPDSPSEDocument:getCoverPageImage()
     -- Return the first page as cover
-    local first_page = self:openPage(0)
+    local first_page = self:openPage(1)
     if first_page and first_page.image_bb then
         return first_page.image_bb:copy()
     end

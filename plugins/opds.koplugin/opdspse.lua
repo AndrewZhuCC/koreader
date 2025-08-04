@@ -9,6 +9,7 @@ local socket = require("socket")
 local socketutil = require("socketutil")
 local UIManager = require("ui/uimanager")
 local url = require("socket.url")
+local Event = require("ui/event")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
@@ -94,7 +95,21 @@ end
 
 function OPDSPSE:streamPages(remote_url, count, continue, username, password, last_page_read)
     -- New approach: Create a streaming document instead of using ImageViewer
-    return self:createStreamingDocument(remote_url, count, username, password, "Streaming Comic")
+    local suc = self:createStreamingDocument(remote_url, count, username, password, "Streaming Comic")
+
+    UIManager:nextTick(function()
+        local reader = UIManager:getTopmostVisibleWidget()
+        if continue then
+            logger.dbg("OPDSPSE: gotoPage")
+            self:jumpToPageReader(reader, count)
+        elseif last_page_read then
+            logger.dbg("OPDSPSE: handleEvent GotoPage", last_page_read)
+            reader:handleEvent(Event:new("GotoPage", last_page_read))
+        end
+    end)
+    
+
+    return suc
 end
 
 function OPDSPSE:streamPagesOld(remote_url, count, continue, username, password, last_page_read)
@@ -171,6 +186,40 @@ function OPDSPSE:streamPagesOld(remote_url, count, continue, username, password,
         -- and ImageViewer is not.
         viewer:switchToImageNum(last_page+1)
     end
+end
+
+-- Shows a page number dialog for page streaming.
+function OPDSPSE:jumpToPageReader(reader, count)
+    local input_dialog
+    input_dialog = InputDialog:new{
+        title = _("Enter page number"),
+        input_type = "number",
+        input_hint = "(" .. "1 - " .. count .. ")",
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(input_dialog)
+                    end,
+                },
+                {
+                    text = _("Stream"),
+                    is_enter_default = true,
+                    callback = function()
+                        local page_num = input_dialog:getInputValue()
+                        if page_num then
+                            UIManager:close(input_dialog)
+                            reader:handleEvent(Event:new("GotoPage", math.min(math.max(1, page_num), count)))
+                        end
+                    end,
+                },
+            }
+        },
+    }
+    UIManager:show(input_dialog)
+    input_dialog:onShowKeyboard()
 end
 
 -- Shows a page number dialog for page streaming.
