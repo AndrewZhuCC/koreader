@@ -2,6 +2,7 @@ local BD = require("ui/bidi")
 local ConfirmBox = require("ui/widget/confirmbox")
 local DataStorage = require("datastorage")
 local Dispatcher = require("dispatcher")
+local DocumentRegistry = require("document/documentregistry")
 local LuaSettings = require("luasettings")
 local OPDSBrowser = require("opdsbrowser")
 local UIManager = require("ui/uimanager")
@@ -45,6 +46,10 @@ local OPDS = WidgetContainer:extend{
 }
 
 function OPDS:init()
+    -- Register OPDSPSE document provider
+    local OPDSPSEDocument = require("plugins/opds.koplugin/opdspse_document")
+    OPDSPSEDocument:register(DocumentRegistry)
+    
     self.opds_settings = LuaSettings:open(self.opds_settings_file)
     if next(self.opds_settings.data) == nil then
         self.updated = true -- first run, force flush

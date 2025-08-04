@@ -93,6 +93,11 @@ function OPDSPSE:getLastPage(remote_url, username, password)
 end
 
 function OPDSPSE:streamPages(remote_url, count, continue, username, password, last_page_read)
+    -- New approach: Create a streaming document instead of using ImageViewer
+    return self:createStreamingDocument(remote_url, count, username, password, "Streaming Comic")
+end
+
+function OPDSPSE:streamPagesOld(remote_url, count, continue, username, password, last_page_read)
     -- attempt to pull chapter progress from Kavita if user pressed
     -- "Page Stream" button.
     -- We have to pull the progress here, otherwise the creation of the page_table
@@ -200,6 +205,50 @@ function OPDSPSE:jumpToPage(viewer, count)
     }
     UIManager:show(input_dialog)
     input_dialog:onShowKeyboard()
+end
+
+-- Creates a .opdspse file and opens it as a document
+function OPDSPSE:createStreamingDocument(remote_url, count, username, password, title)
+    local temp_dir = "/tmp/koreader_streaming"
+    local lfs = require("libs/libkoreader-lfs")
+    
+    -- Create temp directory if it doesn't exist
+    if not lfs.attributes(temp_dir) then
+        lfs.mkdir(temp_dir)
+    end
+    
+    -- Create .opdspse file
+    local filename = (title or "streaming"):gsub("[^%w%-_.]", "_") -- sanitize filename
+    local opdspse_path = temp_dir .. "/" .. filename .. "_" .. os.time() .. ".opdspse"
+    
+    local file = io.open(opdspse_path, "w")
+    if not file then
+        local InfoMessage = require("ui/widget/infomessage")
+        UIManager:show(InfoMessage:new{
+            text = _("Failed to create streaming document file"),
+        })
+        return false
+    end
+    
+    -- Write configuration in simple key=value format
+    file:write("remote_url=" .. remote_url .. "\n")
+    file:write("count=" .. tostring(count) .. "\n")
+    if username then
+        file:write("username=" .. username .. "\n")
+    end
+    if password then
+        file:write("password=" .. password .. "\n")
+    end
+    if title then
+        file:write("title=" .. title .. "\n")
+    end
+    file:close()
+    
+    -- Open the document using ReaderUI
+    local ReaderUI = require("apps/reader/readerui")
+    ReaderUI:showReader(opdspse_path)
+    
+    return true
 end
 
 return OPDSPSE
