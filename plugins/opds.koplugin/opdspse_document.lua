@@ -101,6 +101,9 @@ function OPDSPSEDocument:init()
     end
 
     self:_readMetadata()
+    self.page_data_cache = {}
+    self.size_cache = {}
+    self.cover_image_data = nil
     logger.info("OPDSPSEDocument: Initialized with", self.count, "pages")
 end
 
