@@ -203,12 +203,14 @@ function OPDSPSEDocument:getPageImage(pageno)
     local page_bb = self:downloadPage(pageno)
     
     -- Cache the result (but limit cache size)
-    if #self.page_cache > 10 then
+    if #self.page_cache > 3 then
         -- Simple cache eviction: remove first item
         for k, v in pairs(self.page_cache) do
             self.page_cache[k] = nil
             break
         end
+        collectgarbage()
+        collectgarbage()
     end
     self.page_cache[pageno] = page_bb
     
@@ -244,9 +246,9 @@ function OPDSPSEDocument:downloadPage(pageno)
 
     local data = table.concat(page_data)
     if code == 200 then
+        logger.dbg("OPDSPSEDocument: Successfully downloaded page", pageno)
         local page_bb = RenderImage:renderImageData(data, #data, false)
                      or RenderImage:renderImageFile("resources/koreader.png", false)
-        logger.dbg("OPDSPSEDocument: Successfully downloaded page", pageno)
         return page_bb
     else
         logger.dbg("OPDSPSEDocument: Request failed:", status or code)

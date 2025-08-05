@@ -177,7 +177,7 @@ function OPDSBrowser:showFacetMenu()
             })
 
             for __, link in ipairs(facets) do
-                local facet_text = link.title
+                local facet_text = link.title or "comic"
                 if link["thr:count"] then
                     facet_text = T(_("%1 (%2)"), facet_text, link["thr:count"])
                 end
