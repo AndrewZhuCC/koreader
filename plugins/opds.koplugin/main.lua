@@ -10,6 +10,7 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local util = require("util")
 local _ = require("gettext")
 local T = require("ffi/util").template
+local ReaderUI = require("apps/reader/readerui")
 
 local OPDS = WidgetContainer:extend{
     name = "opds",
@@ -76,7 +77,23 @@ function OPDS:addToMainMenu(menu_items)
                 self:onShowOPDSCatalog()
             end,
         }
+    elseif self.ui.document.file:match("%.opdspse$") then
+        menu_items.opds = {
+            text = "Go back to OPDS",
+            sorting_hint = "main",
+            callback = function()
+                self:closeReaderUi()
+            end
+        }
     end
+end
+
+function OPDS:closeReaderUi()
+  -- Let all event handlers run before closing the ReaderUI, because
+  -- some stuff might break if we just remove it ASAP
+  UIManager:nextTick(function()
+    ReaderUI.instance:onClose()
+  end)
 end
 
 function OPDS:onShowOPDSCatalog()
@@ -98,6 +115,15 @@ function OPDS:onShowOPDSCatalog()
                 self.opds_browser.download_list.close_callback()
             end
             UIManager:close(self.opds_browser)
+            if ReaderUI and ReaderUI.instance then
+                ReaderUI.instance:onClose()
+            end
+            local FileManager = require("apps/filemanager/filemanager")
+            if FileManager.instance then
+                FileManager.instance:reinit()
+            else
+                FileManager:showFiles()
+            end
             self.opds_browser = nil
             if self.last_downloaded_file then
                 if self.ui.file_chooser then
