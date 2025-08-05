@@ -25,7 +25,9 @@ local OPDSPSEDocument = Document:extend{
     username = nil,
     password = nil,
     title = nil,
-    page_cache = {},
+    page_data_cache = {},
+    size_cache = {},
+    cover_image_data = nil,
 }
 
 local OPDSPSEPage = {}
@@ -59,7 +61,10 @@ function OPDSPSEPage:getUsedBBox()
 end
 
 function OPDSPSEPage:close()
-    -- No resources to free in this case
+    if self.image_bb ~= nil then
+        self.image_bb:free()
+        self.image_bb = nil
+    end
 end
 
 function OPDSPSEDocument:init()
@@ -143,21 +148,30 @@ function OPDSPSEDocument:getPages()
 end
 
 function OPDSPSEDocument:getCacheSize()
-    return self.page_cache and #self.page_cache or 0
+    return self.page_data_cache and #self.page_data_cache or 0
 end
 
 function OPDSPSEDocument:cleanCache()
-    self.page_cache = {}
+    self.page_data_cache = {}
 end
 
 function OPDSPSEDocument:getOriginalPageSize(pageno)
+    local cached_size = self.size_cache[pageno]
+    if cached_size ~= nil then
+        return cached_size.width, cached_size.height, 4 -- width, height, components
+    end
+    -- Fallback to actual image size if not cached
     local pageImage = self:getPageImage(pageno)
+    if not pageImage then
+        logger.warn("OPDSPSEDocument: No image for page", pageno)
+        return Screen:getWidth(), Screen:getHeight(), 4 -- Default to zero size if no image
+    end
     return pageImage:getWidth(), pageImage:getHeight(), 4 -- width, height, components
 end
 
 function OPDSPSEDocument:getUsedBBox(pageno)
-    local pageImage = self:getPageImage(pageno)
-    return { x0 = 0, y0 = 0, x1 = pageImage:getWidth(), y1 = pageImage:getHeight() }
+    local width, height, _ = self:getOriginalPageSize(pageno)
+    return { x0 = 0, y0 = 0, x1 = width, y1 = height }
 end
 
 function OPDSPSEDocument:getDocumentProps()
@@ -169,6 +183,10 @@ end
 
 function OPDSPSEDocument:getCoverPageImage()
     -- Return the first page as cover
+    if self.cover_image_data then
+        return RenderImage:renderImageData(self.cover_image_data, #self.cover_image_data, false)
+    end
+
     local first_page = self:openPage(1)
     if first_page and first_page.image_bb then
         return first_page.image_bb:copy()
@@ -193,31 +211,29 @@ function OPDSPSEDocument:getPageImage(pageno)
         return RenderImage:renderImageFile("resources/koreader.png", false)
     end
     
-    -- Check cache first
-    if self.page_cache[pageno] then
-        logger.dbg("OPDSPSEDocument: Using cached page", pageno)
-        return self.page_cache[pageno]
-    end
-    
     -- Download and render the page
     local page_bb = self:downloadPage(pageno)
-    
-    -- Cache the result (but limit cache size)
-    if #self.page_cache > 3 then
+
+    if #self.size_cache > 10 then
         -- Simple cache eviction: remove first item
-        for k, v in pairs(self.page_cache) do
-            self.page_cache[k] = nil
+        for k, v in pairs(self.size_cache) do
+            self.size_cache[k] = nil
             break
         end
-        collectgarbage()
-        collectgarbage()
     end
-    self.page_cache[pageno] = page_bb
+    self.size_cache[pageno] = { width = page_bb:getWidth(), height = page_bb:getHeight() }
     
     return page_bb
 end
 
-function OPDSPSEDocument:downloadPage(pageno)
+function OPDSPSEDocument:getOrDownloadPageData(pageno)
+    -- Check cache first
+    if self.page_data_cache[pageno] then
+        logger.dbg("OPDSPSEDocument: Using cached page", pageno)
+        return self.page_data_cache[pageno]
+    end
+
+    local code, headers, status
     local index = pageno - 1 -- Convert to zero-based index
     local page_url = self.remote_url:gsub("{pageNumber}", tostring(index))
     page_url = page_url:gsub("{maxWidth}", tostring(Screen:getWidth()))
@@ -225,8 +241,6 @@ function OPDSPSEDocument:downloadPage(pageno)
 
     logger.dbg("OPDSPSEDocument: Downloading page from", page_url)
     local parsed = url.parse(page_url)
-
-    local code, headers, status
     if parsed.scheme == "http" or parsed.scheme == "https" then
         socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
         code, headers, status = socket.skip(1, http.request {
@@ -241,19 +255,46 @@ function OPDSPSEDocument:downloadPage(pageno)
         socketutil:reset_timeout()
     else
         logger.err("OPDSPSEDocument: Invalid protocol", parsed.scheme)
-        return RenderImage:renderImageFile("resources/koreader.png", false)
+        return nil
     end
 
     local data = table.concat(page_data)
     if code == 200 then
+        if #self.page_data_cache > 3 then
+            -- Simple cache eviction: remove first item
+            for k, v in pairs(self.page_data_cache) do
+                self.page_data_cache[k] = nil
+                break
+            end
+            collectgarbage()
+            collectgarbage()
+        end
+        self.page_data_cache[pageno] = data -- Cache the downloaded data
         logger.dbg("OPDSPSEDocument: Successfully downloaded page", pageno)
-        local page_bb = RenderImage:renderImageData(data, #data, false)
-                     or RenderImage:renderImageFile("resources/koreader.png", false)
-        return page_bb
+        return data
     else
         logger.dbg("OPDSPSEDocument: Request failed:", status or code)
         logger.dbg("OPDSPSEDocument: Response headers:", headers)
+        return nil
+    end
+end
+
+function OPDSPSEDocument:downloadPage(pageno)
+    local data = self:getOrDownloadPageData(pageno)
+    if pageno == 1 then
+        self.cover_image_data = data -- Cache cover image data
+    elseif self.cover_image_data == nil then
+        self.cover_image_data = self:getOrDownloadPageData(1)
+    end
+    if not data then
         return RenderImage:renderImageFile("resources/koreader.png", false)
+    else
+        local page_bb = RenderImage:renderImageData(data, #data, false)
+        if not page_bb then
+            logger.err("OPDSPSEDocument: Failed to render page", pageno)
+            return RenderImage:renderImageFile("resources/koreader.png", false)
+        end
+        return page_bb
     end
 end
 
@@ -261,7 +302,13 @@ function OPDSPSEDocument:close()
     if self.is_open then
         self.is_open = false
         -- Clear cache
-        self.page_cache = {}
+        self.page_data_cache = {}
+        self.size_cache = {}
+        self.cover_image_data = nil
+        if self.file then
+            local util = require("util")
+            util.removeFile(self.file)
+        end
         logger.dbg("OPDSPSEDocument: Document closed")
     end
 end
