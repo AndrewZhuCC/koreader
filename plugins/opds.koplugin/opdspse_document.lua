@@ -28,6 +28,7 @@ local OPDSPSEDocument = Document:extend{
     page_data_cache = {},
     size_cache = {},
     cover_image_data = nil,
+    koptinterface = nil,
 }
 
 local OPDSPSEPage = {}
@@ -76,6 +77,9 @@ function OPDSPSEDocument:init()
         error("Failed to read OPDSPSE configuration")
     end
     
+    self.koptinterface = require("document/koptinterface")
+    self.koptinterface:setDefaultConfigurable(self.configurable)
+
     self.remote_url = config.remote_url
     self.count = config.count
     self.username = config.username
@@ -88,7 +92,7 @@ function OPDSPSEDocument:init()
     -- Set up document properties
     self.is_open = true
     self.info.has_pages = true
-    self.info.configurable = false
+    self.info.configurable = true
     self.info.number_of_pages = self.count
     
     -- Enforce dithering like PicDocument
