@@ -16,6 +16,7 @@ local time = require("ui/time")
 local util = require("util")
 local T = require("ffi/util").template
 local _ = require("gettext")
+local dkjson = require("dkjson")
 
 if G_reader_settings:hasNot("device_id") then
     G_reader_settings:saveSetting("device_id", random.uuid())
@@ -735,6 +736,20 @@ function KOSync:getProgress(ensure_networking, interactive)
                 return
             end
 
+            -- Debug: Check body type and try to parse JSON if it's a string
+            logger.dbg("KOSync: body type:", type(body))
+            if type(body) == "string" then
+                logger.dbg("KOSync: body is string, attempting JSON parse:", body)
+                local success, parsed_body = pcall(dkjson.decode, body)
+                if success then
+                    logger.dbg("KOSync: JSON parse successful, using parsed body")
+                    body = parsed_body
+                else
+                    logger.warn("KOSync: JSON parse failed, using original body")
+                end
+            end
+
+            logger.dbg("KOSync: percentage:", body.percentage)
             if not body.percentage then
                 if interactive then
                     UIManager:show(InfoMessage:new{
