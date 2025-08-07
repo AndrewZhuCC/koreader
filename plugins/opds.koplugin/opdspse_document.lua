@@ -9,6 +9,7 @@ local socket = require("socket")
 local socketutil = require("socketutil")
 local url = require("socket.url")
 local Screen = require("device").screen
+local KOPTContext = require("ffi/koptcontext")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
@@ -114,6 +115,146 @@ function OPDSPSEPage:close()
     end
 end
 
+function OPDSPSEPage:getPagePix(kopt_context)
+    if not self.image_bb then
+        logger.err("OPDSPSEPage: No image for getPagePix")
+        return
+    end
+    
+    -- Get bbox from kopt_context
+    local bbox = kopt_context.bbox
+    local zoom = kopt_context.zoom
+    
+    -- Calculate the region to extract based on bbox and zoom
+    local img_width = self.image_bb:getWidth()
+    local img_height = self.image_bb:getHeight()
+    
+    -- Apply bbox coordinates (in page coordinates)
+    local crop_x0 = math.max(0, math.floor(bbox.x0))
+    local crop_y0 = math.max(0, math.floor(bbox.y0))
+    local crop_x1 = math.min(img_width, math.ceil(bbox.x1))
+    local crop_y1 = math.min(img_height, math.ceil(bbox.y1))
+    
+    -- Calculate cropped dimensions
+    local crop_width = crop_x1 - crop_x0
+    local crop_height = crop_y1 - crop_y0
+    
+    if crop_width <= 0 or crop_height <= 0 then
+        logger.warn("OPDSPSEPage: Invalid crop dimensions", crop_width, crop_height)
+        crop_x0, crop_y0 = 0, 0
+        crop_width, crop_height = img_width, img_height
+    end
+    
+    -- Apply zoom to get final dimensions
+    local final_width = math.floor(crop_width * zoom + 0.5)
+    local final_height = math.floor(crop_height * zoom + 0.5)
+    
+    -- Ensure minimum dimensions
+    if final_width < 1 then final_width = 1 end
+    if final_height < 1 then final_height = 1 end
+    
+    logger.dbg("OPDSPSEPage: getPagePix - bbox:", bbox.x0, bbox.y0, bbox.x1, bbox.y1)
+    logger.dbg("OPDSPSEPage: getPagePix - crop:", crop_x0, crop_y0, crop_width, crop_height)
+    logger.dbg("OPDSPSEPage: getPagePix - final size:", final_width, final_height, "zoom:", zoom)
+    
+    -- Create cropped and scaled version of the image
+    local working_bb
+    
+    -- First crop the image if needed
+    if crop_x0 > 0 or crop_y0 > 0 or crop_width < img_width or crop_height < img_height then
+        working_bb = self.image_bb:crop(crop_x0, crop_y0, crop_width, crop_height)
+    else
+        working_bb = self.image_bb
+    end
+    
+    -- Then scale if needed
+    local final_bb
+    if zoom ~= 1.0 or final_width ~= crop_width or final_height ~= crop_height then
+        final_bb = working_bb:scale(final_width, final_height)
+        if working_bb ~= self.image_bb then
+            working_bb:free() -- Free the cropped version
+        end
+    else
+        final_bb = working_bb
+    end
+    
+    -- Initialize the destination bitmap in kopt_context.src
+    KOPTContext.k2pdfopt.bmp_init(kopt_context.src)
+    
+    -- Convert BlitBuffer to WILLUSBITMAP
+    self:blitbufferToWillusBitmap(kopt_context, final_bb, kopt_context.src)
+    
+    -- Set the page dimensions in kopt_context
+    kopt_context.page_width = final_bb:getWidth()
+    kopt_context.page_height = final_bb:getHeight()
+    
+    -- Clean up temporary buffers
+    if final_bb ~= self.image_bb then
+        final_bb:free()
+    end
+    
+    logger.dbg("OPDSPSEPage: getPagePix completed - size:", kopt_context.page_width, kopt_context.page_height)
+end
+
+-- Helper function to convert BlitBuffer to WILLUSBITMAP
+function OPDSPSEPage:blitbufferToWillusBitmap(kopt_context, bb, willusbitmap)
+    local ffi = require("ffi")
+    
+    local width = bb:getWidth()
+    local height = bb:getHeight()
+    local bb_type = bb:getType()
+    
+    -- Set up WILLUSBITMAP structure
+    willusbitmap.width = width
+    willusbitmap.height = height
+    
+    -- Determine bits per pixel based on BlitBuffer type
+    if bb:isRGB() then
+        willusbitmap.bpp = 24 -- RGB format
+    else
+        willusbitmap.bpp = 8  -- Grayscale format
+    end
+    
+    -- Allocate memory for the bitmap
+    if KOPTContext.k2pdfopt.bmp_alloc(willusbitmap) == 0 then
+        logger.err("OPDSPSEPage: Failed to allocate WILLUSBITMAP memory")
+        return
+    end
+    
+    -- Set up color palette for grayscale images
+    if willusbitmap.bpp == 8 then
+        for i = 0, 255 do
+            willusbitmap.red[i] = i
+            willusbitmap.green[i] = i  
+            willusbitmap.blue[i] = i
+        end
+    end
+    
+    -- Copy pixel data from BlitBuffer to WILLUSBITMAP
+    local data_ptr = ffi.cast("unsigned char*", willusbitmap.data)
+    local bytes_per_pixel = willusbitmap.bpp / 8
+    local bytes_per_line = width * bytes_per_pixel
+    
+    for y = 0, height - 1 do
+        local line_offset = y * bytes_per_line
+        for x = 0, width - 1 do
+            local pixel = bb:getPixel(x, y)
+            local pixel_offset = line_offset + x * bytes_per_pixel
+            
+            if willusbitmap.bpp == 24 then
+                -- RGB format - note: WILLUSBITMAP expects BGR order
+                data_ptr[pixel_offset] = pixel:getB()     -- Blue
+                data_ptr[pixel_offset + 1] = pixel:getG() -- Green  
+                data_ptr[pixel_offset + 2] = pixel:getR() -- Red
+            else
+                -- Grayscale format
+                local gray = pixel:getAlpha() -- For grayscale BlitBuffer
+                data_ptr[pixel_offset] = gray
+            end
+        end
+    end
+end
+
 function OPDSPSEDocument:init()
     self:updateColorRendering()
     
@@ -200,14 +341,6 @@ function OPDSPSEDocument:getPages()
     return self.count
 end
 
-function OPDSPSEDocument:getCacheSize()
-    return self.page_data_cache and #self.page_data_cache or 0
-end
-
-function OPDSPSEDocument:cleanCache()
-    self.page_data_cache = {}
-end
-
 function OPDSPSEDocument:getOriginalPageSize(pageno)
     local cached_size = self.size_cache[pageno]
     if cached_size ~= nil then
@@ -250,10 +383,18 @@ end
 -- This mimics the PicDocument API
 function OPDSPSEDocument:openPage(pageno)
     local page_bb = self:getPageImage(pageno)
+    if not page_bb then
+        logger.err("OPDSPSEDocument: Failed to get page image for page", pageno)
+        page_bb = RenderImage:renderImageFile("resources/koreader.png", false)
+    end
+    
+    local width = page_bb and page_bb:getWidth() or 0
+    local height = page_bb and page_bb:getHeight() or 0
+    
     return OPDSPSEPage:new{
         image_bb = page_bb,
-        width = page_bb:getWidth(),
-        height = page_bb:getHeight(),
+        width = width,
+        height = height,
         doc = self,
     }
 end
@@ -266,6 +407,10 @@ function OPDSPSEDocument:getPageImage(pageno)
     
     -- Download and render the page
     local page_bb = self:downloadPage(pageno)
+    if not page_bb then
+        logger.err("OPDSPSEDocument: Failed to download page", pageno)
+        return RenderImage:renderImageFile("resources/koreader.png", false)
+    end
 
     if #self.size_cache > 10 then
         -- Simple cache eviction: remove first item
@@ -274,8 +419,11 @@ function OPDSPSEDocument:getPageImage(pageno)
             break
         end
     end
-    self.size_cache[pageno] = { width = page_bb:getWidth(), height = page_bb:getHeight() }
     
+    if page_bb then
+        self.size_cache[pageno] = { width = page_bb:getWidth(), height = page_bb:getHeight() }
+    end
+
     return page_bb
 end
 
@@ -365,6 +513,86 @@ function OPDSPSEDocument:close()
         logger.dbg("OPDSPSEDocument: Document closed")
     end
 end
+
+-- 
+
+function OPDSPSEDocument:getPageTextBoxes(pageno)
+    return ""
+end
+
+function OPDSPSEDocument:comparePositions(pos1, pos2)
+    return self.koptinterface:comparePositions(self, pos1, pos2)
+end
+
+function OPDSPSEDocument:getPanelFromPage(pageno, pos)
+    return self.koptinterface:getPanelFromPage(self, pageno, pos)
+end
+
+function OPDSPSEDocument:getWordFromPosition(spos)
+    return self.koptinterface:getWordFromPosition(self, spos)
+end
+
+function OPDSPSEDocument:getTextFromPositions(spos0, spos1)
+    return self.koptinterface:getTextFromPositions(self, spos0, spos1)
+end
+
+function OPDSPSEDocument:getTextBoxes(pageno)
+    return self.koptinterface:getTextBoxes(self, pageno)
+end
+
+function OPDSPSEDocument:getPageBoxesFromPositions(pageno, ppos0, ppos1)
+    return self.koptinterface:getPageBoxesFromPositions(self, pageno, ppos0, ppos1)
+end
+
+function OPDSPSEDocument:nativeToPageRectTransform(pageno, rect)
+    return self.koptinterface:nativeToPageRectTransform(self, pageno, rect)
+end
+
+function OPDSPSEDocument:getSelectedWordContext(word, nb_words, pos)
+    return self.koptinterface:getSelectedWordContext(word, nb_words, pos)
+end
+
+function OPDSPSEDocument:getOCRWord(pageno, wbox)
+    return self.koptinterface:getOCRWord(self, pageno, wbox)
+end
+
+function OPDSPSEDocument:getOCRText(pageno, tboxes)
+    return self.koptinterface:getOCRText(self, pageno, tboxes)
+end
+
+function OPDSPSEDocument:getPageBlock(pageno, x, y)
+    return self.koptinterface:getPageBlock(self, pageno, x, y)
+end
+
+function OPDSPSEDocument:getPageBBox(pageno)
+    return self.koptinterface:getPageBBox(self, pageno)
+end
+
+function OPDSPSEDocument:getPageDimensions(pageno, zoom, rotation)
+    return self.koptinterface:getPageDimensions(self, pageno, zoom, rotation)
+end
+
+function OPDSPSEDocument:findText(pattern, origin, reverse, case_insensitive, page)
+    return self.koptinterface:findText(self, pattern, origin, reverse, case_insensitive, page)
+end
+
+function OPDSPSEDocument:findAllText(pattern, case_insensitive, nb_context_words, max_hits)
+    return self.koptinterface:findAllText(self, pattern, case_insensitive, nb_context_words, max_hits)
+end
+
+function OPDSPSEDocument:renderPage(pageno, rect, zoom, rotation, gamma, hinting)
+    return self.koptinterface:renderPage(self, pageno, rect, zoom, rotation, gamma, hinting)
+end
+
+function OPDSPSEDocument:hintPage(pageno, zoom, rotation, gamma)
+    return self.koptinterface:hintPage(self, pageno, zoom, rotation, gamma)
+end
+
+function OPDSPSEDocument:drawPage(target, x, y, rect, pageno, zoom, rotation, gamma)
+    return self.koptinterface:drawPage(self, target, x, y, rect, pageno, zoom, rotation, gamma)
+end
+
+-- 
 
 function OPDSPSEDocument:register(registry)
     registry:addProvider("opdspse", "application/opdspse", self, 100)
