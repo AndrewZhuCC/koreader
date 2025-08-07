@@ -45,10 +45,56 @@ OPDSPSEPage.new = OPDSPSEPage.extend
 function OPDSPSEPage:draw(dc, bb)
     if self.image_bb then
         local scaled_bb = self.image_bb:scale(bb:getWidth(), bb:getHeight())
+        
+        -- Apply gamma correction if needed
+        local gamma = dc:getGamma()
+        if gamma >= 0.0 and gamma ~= 1.0 then
+            self:applyGamma(scaled_bb, gamma)
+        end
+        
         bb:blitFullFrom(scaled_bb, 0, 0)
         scaled_bb:free()
     else
         logger.err("OPDSPSEPage: No image to draw")
+    end
+end
+
+-- Simple gamma correction implementation using BlitBuffer API
+function OPDSPSEPage:applyGamma(bb, gamma)
+    -- Build gamma lookup table - use gamma directly, not inverse
+    local gamma_table = {}
+    for i = 0, 255 do
+        local normalized = i / 255.0
+        local corrected = normalized ^ gamma  -- Use gamma directly, not inv_gamma
+        gamma_table[i] = math.floor(corrected * 255.0 + 0.5)
+    end
+    
+    -- Get the BlitBuffer ffi types we need
+    local ffi = require("ffi")
+    local Color8 = ffi.typeof("Color8")
+    local ColorRGB32 = ffi.typeof("ColorRGB32")
+    
+    -- Apply gamma correction to each pixel using proper BlitBuffer API
+    for y = 0, bb.h - 1 do
+        for x = 0, bb.w - 1 do
+            local pixel = bb:getPixel(x, y)
+            local corrected_pixel
+            
+            if bb:isRGB() then
+                -- For RGB images, apply gamma to each color component
+                local r = gamma_table[pixel:getR()]
+                local g = gamma_table[pixel:getG()]  
+                local b = gamma_table[pixel:getB()]
+                local alpha = pixel:getAlpha()
+                corrected_pixel = ColorRGB32(r, g, b, alpha)
+            else
+                -- For grayscale images
+                local gray = gamma_table[pixel:getAlpha()]
+                corrected_pixel = Color8(gray)
+            end
+            
+            bb:setPixel(x, y, corrected_pixel)
+        end
     end
 end
 
