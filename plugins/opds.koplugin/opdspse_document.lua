@@ -632,12 +632,16 @@ function OPDSPSEDocument:getNextChapterUrl()
     return prefix .. tostring(next_id) .. suffix, next_id
 end
 
---- Build a metadata URL for the given chapter URL by replacing
---- /page/{pageNumber}... with /metadata.
---- e.g. .../chapter/29/page/{pageNumber}?foo -> .../chapter/29/metadata
+--- Build a metadata URL from a page-stream URL.
+--- The stream URL uses /api/v1/manga/{id}/chapter/{ch}/page/...
+--- but metadata lives at  /api/opds/v1.2/series/{id}/chapter/{ch}/metadata
+--- Also handles the case where the URL already uses the OPDS path.
 function OPDSPSEDocument:buildMetadataUrl(chapter_url)
     local base = chapter_url:match("^(.*/chapter/%d+/)")
-    return base and (base .. "metadata")
+    if not base then return nil end
+    -- Rewrite /api/v1/manga/ → /api/opds/v1.2/series/ if needed
+    base = base:gsub("/api/v1/manga/", "/api/opds/v1.2/series/")
+    return base .. "metadata"
 end
 
 --- Fetch chapter metadata from the OPDS server.
