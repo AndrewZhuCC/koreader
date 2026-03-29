@@ -39,27 +39,45 @@ function OPDSPSEPage:extend(o)
 end
 OPDSPSEPage.new = OPDSPSEPage.extend
 
-function OPDSPSEPage:draw(dc, bb)
+function OPDSPSEPage:draw(dc, bb, x_offset, y_offset)
     if not self.image_bb then
         logger.err("OPDSPSEPage: No image to draw")
         return
     end
 
+    x_offset = x_offset or 0
+    y_offset = y_offset or 0
+
     local target_w = bb:getWidth()
     local target_h = bb:getHeight()
+    local zoom = dc:getZoom()
     local src_w = self.image_bb:getWidth()
     local src_h = self.image_bb:getHeight()
 
     local scaled_bb
-    if self.image_data and (target_w ~= src_w or target_h ~= src_h) then
-        -- Re-render from raw image bytes at the exact target size using
-        -- MuPDF / TurboJpeg (high-quality resampling), instead of the
-        -- nearest-neighbour BlitBuffer:scale().
-        scaled_bb = RenderImage:renderImageData(
-            self.image_data, #self.image_data, false, target_w, target_h)
-    end
-    if not scaled_bb then
-        scaled_bb = self.image_bb:scale(target_w, target_h)
+    if x_offset == 0 and y_offset == 0 then
+        -- Full-page render: scale the whole image to the target BB size.
+        if self.image_data and (target_w ~= src_w or target_h ~= src_h) then
+            scaled_bb = RenderImage:renderImageData(
+                self.image_data, #self.image_data, false, target_w, target_h)
+        end
+        if not scaled_bb then
+            scaled_bb = self.image_bb:scale(target_w, target_h)
+        end
+    else
+        -- Partial render (e.g. panel zoom from drawPagePart):
+        -- x_offset/y_offset are in *zoomed* coordinates.  Map back to
+        -- original image coordinates, crop, then scale up to target size.
+        local crop_x = math.max(0, math.floor(x_offset / zoom))
+        local crop_y = math.max(0, math.floor(y_offset / zoom))
+        local crop_w = math.min(src_w - crop_x, math.ceil(target_w / zoom))
+        local crop_h = math.min(src_h - crop_y, math.ceil(target_h / zoom))
+        if crop_w > 0 and crop_h > 0 then
+            local cropped = self.image_bb:viewport(crop_x, crop_y, crop_w, crop_h)
+            scaled_bb = cropped:scale(target_w, target_h)
+        else
+            scaled_bb = self.image_bb:scale(target_w, target_h)
+        end
     end
 
     local gamma = dc:getGamma()
