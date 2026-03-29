@@ -60,42 +60,50 @@ function OPDSPSEPage:draw(dc, bb)
     end
 end
 
--- Simple gamma correction implementation using BlitBuffer API
 function OPDSPSEPage:applyGamma(bb, gamma)
-    -- Build gamma lookup table - use gamma directly, not inverse
-    local gamma_table = {}
-    for i = 0, 255 do
-        local normalized = i / 255.0
-        local corrected = normalized ^ gamma  -- Use gamma directly, not inv_gamma
-        gamma_table[i] = math.floor(corrected * 255.0 + 0.5)
-    end
-    
-    -- Get the BlitBuffer ffi types we need
     local ffi = require("ffi")
-    local Color8 = ffi.typeof("Color8")
-    local ColorRGB32 = ffi.typeof("ColorRGB32")
-    
-    -- Apply gamma correction to each pixel using proper BlitBuffer API
-    for y = 0, bb.h - 1 do
-        for x = 0, bb.w - 1 do
-            local pixel = bb:getPixel(x, y)
-            local corrected_pixel
-            
-            if bb:isRGB() then
-                -- For RGB images, apply gamma to each color component
-                local r = gamma_table[pixel:getR()]
-                local g = gamma_table[pixel:getG()]  
-                local b = gamma_table[pixel:getB()]
-                local alpha = pixel:getAlpha()
-                corrected_pixel = ColorRGB32(r, g, b, alpha)
-            else
-                -- For grayscale images
-                local gray = gamma_table[pixel:getAlpha()]
-                corrected_pixel = Color8(gray)
+    local uint8pt = ffi.typeof("uint8_t*")
+
+    local lut = ffi.new("uint8_t[256]")
+    for i = 0, 255 do
+        local v = math.floor(((i / 255.0) ^ gamma) * 255.0 + 0.5)
+        lut[i] = v < 0 and 0 or (v > 255 and 255 or v)
+    end
+
+    local w, h = bb.w, bb.h
+    local stride = tonumber(bb.stride)
+    local data = ffi.cast(uint8pt, bb.data)
+    local bb_type = bb:getType()
+
+    if bb_type == 5 then -- TYPE_BBRGB32: 4 bytes per pixel (R, G, B, Alpha)
+        for y = 0, h - 1 do
+            local row = data + y * stride
+            for x = 0, w - 1 do
+                local off = x * 4
+                row[off]     = lut[row[off]]
+                row[off + 1] = lut[row[off + 1]]
+                row[off + 2] = lut[row[off + 2]]
             end
-            
-            bb:setPixel(x, y, corrected_pixel)
         end
+    elseif bb_type == 1 then -- TYPE_BB8: 1 byte per pixel (grayscale)
+        for y = 0, h - 1 do
+            local row = data + y * stride
+            for x = 0, w - 1 do
+                row[x] = lut[row[x]]
+            end
+        end
+    elseif bb_type == 4 then -- TYPE_BBRGB24: 3 bytes per pixel
+        for y = 0, h - 1 do
+            local row = data + y * stride
+            for x = 0, w - 1 do
+                local off = x * 3
+                row[off]     = lut[row[off]]
+                row[off + 1] = lut[row[off + 1]]
+                row[off + 2] = lut[row[off + 2]]
+            end
+        end
+    else
+        logger.warn("OPDSPSEPage:applyGamma: unsupported BB type", bb_type)
     end
 end
 
