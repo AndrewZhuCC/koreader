@@ -1,3 +1,4 @@
+local BookList = require("ui/widget/booklist")
 local DataStorage = require("datastorage")
 local DocumentRegistry = require("document/documentregistry")
 local LuaSettings = require("luasettings")
@@ -11,6 +12,7 @@ local collection_file = DataStorage:getSettingsDir() .. "/collection.lua"
 local ReadCollection = {
     coll = nil, -- hash table
     coll_settings = nil, -- hash table
+    coll_default = nil, -- string or nil
     last_read_time = 0,
     default_collection_name = "favorites",
 }
@@ -56,6 +58,9 @@ function ReadCollection:_read()
         end
         self.coll[coll_name] = coll
         self.coll_settings[coll_name] = collection.settings or { order = 1 } -- favorites, first run
+        if self.coll_settings[coll_name].default then
+            self.coll_default = coll_name
+        end
         if self:updateCollectionFromFolder(coll_name) > 0 then
             updated_collections[coll_name] = true
         end
@@ -289,13 +294,14 @@ function ReadCollection:updateItemsByPath(path, new_path) -- FM: rename folder, 
     end
 end
 
-function ReadCollection:updateCollectionFromFolder(collection_name, folders)
+function ReadCollection:updateCollectionFromFolder(collection_name, folders, is_showing)
     folders = folders or self.coll_settings[collection_name].folders
     local count = 0
     if folders then
         local coll = self.coll[collection_name]
         local filetypes
-        local str = util.tableGetValue(self.coll_settings[collection_name], "filter", "add", "filetype")
+        local filter = util.tableGetValue(self.coll_settings[collection_name], "filter", "add")
+        local str = filter and filter.filetype
         if str then -- string of comma separated file types
             filetypes = {}
             for filetype in util.gsplit(str, ",") do
@@ -305,20 +311,28 @@ function ReadCollection:updateCollectionFromFolder(collection_name, folders)
         local function add_item_callback(file, f, attr)
             file = ffiUtil.realpath(file)
             local does_match = coll[file] == nil and not util.stringStartsWith(f, "._")
-                and (filetypes or DocumentRegistry:hasProvider(file))
+                and (filetypes or DocumentRegistry:hasProvider(f))
             if does_match then
                 if filetypes then
-                    local _, fileext = require("apps/filemanager/filemanagerutil").splitFileNameType(file)
+                    local _, fileext = require("apps/filemanager/filemanagerutil").splitFileNameType(f)
                     does_match = filetypes[fileext]
                 end
                 if does_match then
-                    self:addItem(file, collection_name, attr)
-                    count = count + 1
+                    if filter and filter.status then
+                        does_match = filter.status[BookList.getBookStatus(file)]
+                    end
+                    if does_match then
+                        self:addItem(file, collection_name, attr)
+                        count = count + 1
+                    end
                 end
             end
         end
         for folder, folder_settings in pairs(folders) do
-            util.findFiles(folder, add_item_callback, folder_settings.subfolders)
+            if not is_showing or folder_settings.scan_on_show then
+                logger.dbg("ReadCollection: scanning folder", folder)
+                util.findFiles(folder, add_item_callback, folder_settings.subfolders)
+            end
         end
     end
     return count
@@ -358,11 +372,17 @@ function ReadCollection:renameCollection(coll_name, new_name)
     self.coll[new_name] = self.coll[coll_name]
     self.coll_settings[coll_name] = nil
     self.coll[coll_name] = nil
+    if self.coll_default == coll_name then
+        self.coll_default = new_name
+    end
 end
 
 function ReadCollection:removeCollection(coll_name)
     self.coll_settings[coll_name] = nil
     self.coll[coll_name] = nil
+    if self.coll_default == coll_name then
+        self.coll_default = nil
+    end
 end
 
 function ReadCollection:updateCollectionListOrder(ordered_coll)

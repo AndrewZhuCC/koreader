@@ -25,8 +25,8 @@ local Size = require("ui/size")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 
 local FrameContainer = WidgetContainer:extend{
-    background = nil,
-    color = Blitbuffer.COLOR_BLACK,
+    background = nil, -- background color
+    color = Blitbuffer.COLOR_BLACK, -- border color
     margin = 0,
     radius = nil,
     inner_bordersize = 0,
@@ -101,7 +101,6 @@ function FrameContainer:onUnfocus()
     return true
 end
 
-
 function FrameContainer:paintTo(bb, x, y)
     local my_size = self:getSize()
     if not self.dimen then
@@ -122,15 +121,9 @@ function FrameContainer:paintTo(bb, x, y)
     end
 
     if self.background then
-        if not self.radius or not self.bordersize then
-            bb:paintRoundedRect(x, y,
-                                container_width, container_height,
-                                self.background, self.radius)
-        else
-            bb:paintRoundedRect(x, y,
-                                container_width, container_height,
-                                self.background, self.radius + self.bordersize)
-        end
+        local radius = (self.radius and self.bordersize) and self.radius + self.bordersize or self.radius
+        local paintRoundedRect = Blitbuffer.isColor8(self.background) and bb.paintRoundedRect or bb.paintRoundedRectRGB32
+        paintRoundedRect(bb, x, y, container_width, container_height, self.background, radius)
     end
     if self.stripe_width and self.stripe_color and not self.stripe_over then
         -- (No support for radius when hatched/stripe)

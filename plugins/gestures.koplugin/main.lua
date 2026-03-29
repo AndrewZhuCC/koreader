@@ -205,6 +205,9 @@ function Gestures:isGestureAlwaysActive(ges, multiswipe_directions)
         end
     end
 
+    if ges == "rolling_swipe" or ges == "paging_swipe" then
+        return G_reader_settings:isTrue("page_turns_swipe_always_active")
+    end
     local gest = self.gestures[ges]
     return gest and (gest.toggle_touch_input or gest.touch_input_on or (gest.settings and gest.settings.always_active))
 end
@@ -299,6 +302,7 @@ function Gestures:genMenu(ges)
                 return util.tableEquals(self.gestures[ges], self.defaults[ges])
             end,
             check_callback_updates_menu = true,
+            radio = true,
             callback = function(touchmenu_instance)
                 local function do_remove()
                     self.gestures[ges] = util.tableDeepCopy(self.defaults[ges])
@@ -316,6 +320,7 @@ function Gestures:genMenu(ges)
             return self.gestures[ges] == nil
         end,
         check_callback_updates_menu = true,
+        radio = true,
         callback = function(touchmenu_instance)
             local function do_remove()
                 self.gestures[ges] = nil
@@ -603,6 +608,13 @@ function Gestures:onShowGestureOverview()
                                 text = table.concat(text, "\n"),
                                 show_icon = false,
                             })
+                        end
+                    end
+                    if gest.settings then
+                        if gest.settings.show_as_quickmenu then
+                            value = value .. " \u{F0CA}"
+                        elseif gest.settings.execute_one_by_one then
+                            value = value .. " \u{F051}"
                         end
                     end
                     table.insert(kv_pairs, { key, value, callback = callback, key_bold = false })
@@ -1367,6 +1379,15 @@ function Gestures:onIgnoreHoldCorners(ignore_hold_corners, no_notification)
         Notification:notify(_("Ignore long-press on corners: off"))
     end
     return true
+end
+
+function Gestures:onIgnoreHoldCornersTime(seconds)
+    if G_reader_settings:hasNot("ignore_hold_corners") then
+        self:onIgnoreHoldCorners()
+        UIManager:scheduleIn(seconds, function()
+            self:onIgnoreHoldCorners()
+        end)
+    end
 end
 
 function Gestures:onFlushSettings()

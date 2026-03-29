@@ -783,12 +783,16 @@ end
 --- Recursively scan directory for files inside
 -- @string path
 -- @func callback(fullpath, name, attr)
-function util.findFiles(dir, cb, recursive)
+-- @bool recursive
+-- @int max_files (maximum number of files to find)
+function util.findFiles(dir, cb, recursive, max_files)
     recursive = recursive ~= false
+    local count = 0
     local function scan(current)
         local ok, iter, dir_obj = pcall(lfs.dir, current)
         if not ok then return end
         for f in iter, dir_obj do
+            if max_files and count >= max_files then return end
             local path = current.."/"..f
             -- lfs can return nil here, as it will follow symlinks!
             local attr = lfs.attributes(path) or {}
@@ -798,6 +802,7 @@ function util.findFiles(dir, cb, recursive)
                 end
             elseif attr.mode == "file" or attr.mode == "link" then
                 cb(path, f, attr)
+                count = count + 1
             end
         end
     end
@@ -954,7 +959,7 @@ end
 -- <code>/</code> poses a problem.
 ---- @string str filename
 ---- @treturn string sanitized filename
-local function replaceAllInvalidChars(str)
+function util.replaceAllInvalidChars(str)
     if str then
         str = str:gsub('[\\/:*?"<>|]', '_')
         str = str:gsub("[.%s]+$", "")
@@ -984,7 +989,7 @@ If an optional path is provided, @{util.getFilesystemType}() will be used to det
 ---- @treturn string safe filename
 function util.getSafeFilename(str, path, limit, limit_ext)
     local filename, suffix = util.splitFileNameSuffix(str)
-    local replaceFunc = replaceAllInvalidChars
+    local replaceFunc = util.replaceAllInvalidChars
     local safe_filename
     -- VFAT supports a maximum of 255 UCS-2 characters, although it's probably treated as UTF-16 by Windows
     -- default to a slightly lower limit just in case
@@ -1006,6 +1011,7 @@ function util.getSafeFilename(str, path, limit, limit_ext)
         suffix = nil
     end
 
+    filename = filename:gsub("\r?\n", " "):gsub("\t", " ")
     filename = util.htmlToPlainTextIfHtml(filename)
     filename = filename:sub(1, limit)
     -- the limit might result in broken UTF-8, which we don't want in the result
@@ -1446,17 +1452,23 @@ end
 
 --- Encode URL also known as percent-encoding see https://en.wikipedia.org/wiki/Percent-encoding
 --- @string text the string to encode
+--- @string preserve_chars a string containing all the charactes to preserve unencoded - e.g. "/"
 --- @treturn encode string
---- Taken from https://gist.github.com/liukun/f9ce7d6d14fa45fe9b924a3eed5c3d99
-function util.urlEncode(url)
+--- Originally taken from https://gist.github.com/liukun/f9ce7d6d14fa45fe9b924a3eed5c3d99
+--- Modified to comply with RFC 3986's unreserved characters definition:
+---    ALPHA (A-Z, a-z), DIGIT (0-9), '-', '.', '_', '~'
+function util.urlEncode(url, preserve_chars)
     local char_to_hex = function(c)
         return string.format("%%%02X", string.byte(c))
     end
+    preserve_chars = preserve_chars or ""
+    local pattern_base = "^%w%-%._~"
+    local pattern = string.format("([%s%s])", pattern_base, preserve_chars)
     if url == nil then
         return
     end
     url = url:gsub("\n", "\r\n")
-    url = url:gsub("([^%w%-%.%_%~%!%*%'%(%)])", char_to_hex)
+    url = url:gsub(pattern, char_to_hex)
     return url
 end
 
@@ -1487,6 +1499,11 @@ function util.checkLuaSyntax(lua_text)
     -- with: Line 3: '=' expected near '123'
     err = err and err:gsub("%[string \".-%\"]:", "Line ")
     return err
+end
+
+--- Convert UTF-8 string to lower case.
+function util.stringLower(str)
+   return str and Utf8Proc.lowercase(util.fixUtf8(str, "?"))
 end
 
 --- Simple startsWith string helper.

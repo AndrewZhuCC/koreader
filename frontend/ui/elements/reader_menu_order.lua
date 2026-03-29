@@ -17,7 +17,6 @@ local order = {
         "bookmark_browsing_mode",
         "navi_settings",
         "----------------------------",
-        "page_map",
         "hide_nonlinear_flows",
         "----------------------------",
         "book_map", -- if Device:isTouchDevice() or useDPadAsActionKeys()
@@ -44,6 +43,7 @@ local order = {
         "handmade_hidden_flows",
         "handmade_settings",
         "----------------------------",
+        "page_map",
         "bookmarks_settings",
     },
     typeset = {
@@ -178,6 +178,7 @@ local order = {
         "exporter",
         "statistics",
         "progress_sync",
+        "cloudstorage",
         "move_to_archive",
         "wallabag",
         "news_downloader",
@@ -230,6 +231,7 @@ local order = {
         "----------------------------",
         "favorites",
         "collections",
+        "bookmark_browser",
         "----------------------------",
         "book_status",
         "book_info",

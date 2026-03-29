@@ -4,14 +4,12 @@ local UIManager
 local logger = require("logger")
 local ffi = require("ffi")
 local C = ffi.C
-local inkview = ffi.load("inkview")
+local inkview = require("ffi/inkview")
 local band = require("bit").band
 local util = require("util")
 local _ = require("gettext")
 
-require("ffi/posix_h")
 require("ffi/linux_input_h")
-require("ffi/inkview_h")
 
 local function yes() return true end
 local function no() return false end
@@ -62,6 +60,10 @@ local PocketBook = Generic:extend{
     -- InkView may have started translating button codes based on rotation on newer devices...
     -- That historically wasn't the case, hence this defaulting to false.
     inkview_translates_buttons = false,
+
+    -- Some Pocketbook devices need special handling after resume to restore the correct orientation.
+    -- See https://github.com/koreader/koreader/issues/11033 for details.
+    needs_orientation_sync_after_resume = false,
 
     -- Will be set appropriately at init
     isB288SoC = no,
@@ -359,10 +361,13 @@ function PocketBook:initNetworkManager(NetworkMgr)
         UIManager:unschedule(keepWifiAlive)
 
         if NetworkMgr:isWifiOn() then
-            logger.dbg("ping wifi keep alive and reschedule")
-
-            inkview.NetMgrPing()
-            UIManager:scheduleIn(30, keepWifiAlive)
+            if C.POCKETBOOK_VERSION >= 508 then
+                logger.dbg("ping wifi keep alive and reschedule")
+                inkview.NetMgrPing()
+                UIManager:scheduleIn(30, keepWifiAlive)
+            else
+                logger.info("device does not support NetMgrPing(), no wifi keepalive")
+            end
         else
             logger.dbg("wifi is disabled do not reschedule")
         end
@@ -411,6 +416,12 @@ end
 
 function PocketBook:getDefaultCoverPath()
     return "/mnt/ext1/system/logo/offlogo/cover.bmp"
+end
+
+function PocketBook:isStartupScriptUpToDate()
+    local md5 = require("ffi/MD5")
+    -- Compare the hash of the *active* script to the *potential* one.
+    return md5.sumFile("/tmp/koreader.app") == md5.sumFile("../koreader.app")
 end
 
 function PocketBook:UIManagerReady(uimgr)
@@ -693,6 +704,7 @@ local PocketBook700 = PocketBook:extend{
     hasNaturalLight = yes,
     -- c.f., https://github.com/koreader/koreader/issues/9556
     inkview_translates_buttons = true,
+    needs_orientation_sync_after_resume = true,
 }
 
 -- PocketBook Era Color (PB700K3)
@@ -706,6 +718,7 @@ local PocketBook700K3 = PocketBook:extend{
     hasNaturalLight = yes,
     -- c.f., https://github.com/koreader/koreader/issues/9556
     inkview_translates_buttons = true,
+    needs_orientation_sync_after_resume = true,
 }
 
 function PocketBook700K3._fb_init(fb, finfo, vinfo)

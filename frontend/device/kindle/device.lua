@@ -54,12 +54,21 @@ local function kindleGetSavedNetworks()
     end
     if lipc_handle then
         local ha_input = lipc_handle:new_hasharray() -- an empty hash array since we only want to read
-        local ha_result = lipc_handle:access_hash_property("com.lab126.wifid", "profileData", ha_input)
-        local profiles = ha_result:to_table()
-        ha_result:destroy()
-        ha_input:destroy()
-        lipc_handle:close()
-        return profiles
+        local success, ha_result = pcall(function()
+            return lipc_handle:access_hash_property("com.lab126.wifid", "profileData", ha_input)
+        end)
+        if success then
+            local profiles = ha_result:to_table()
+            ha_result:destroy()
+            ha_input:destroy()
+            lipc_handle:close()
+            return profiles
+        else
+            logger.warn("kindleGetSavedNetworks: failed to access profileData")
+            ha_input:destroy()
+            lipc_handle:close()
+            return {}
+        end
     end
 end
 
@@ -71,12 +80,22 @@ local function kindleGetCurrentProfile()
     end
     if lipc_handle then
         local ha_input = lipc_handle:new_hasharray() -- an empty hash array since we only want to read
-        local ha_result = lipc_handle:access_hash_property("com.lab126.wifid", "currentEssid", ha_input)
-        local profile = ha_result:to_table()[1] -- there is only a single element
-        ha_input:destroy()
-        ha_result:destroy()
-        lipc_handle:close()
-        return profile
+        local success, ha_result = pcall(function()
+            return lipc_handle:access_hash_property("com.lab126.wifid", "currentEssid", ha_input)
+        end)
+
+        if success then
+            local profile = ha_result:to_table()[1] -- there is only a single element
+            ha_input:destroy()
+            ha_result:destroy()
+            lipc_handle:close()
+            return profile
+        else
+            logger.warn("kindleGetCurrentProfile: failed to access currentEssid")
+            ha_input:destroy()
+            lipc_handle:close()
+            return nil
+        end
     else
         return nil
     end
@@ -111,7 +130,14 @@ local function kindleSaveNetwork(data)
         else
             profile:put_string(0, "secured", "no")
         end
-        lipc_handle:access_hash_property("com.lab126.wifid", "createProfile", profile):destroy() -- destroy the returned empty ha
+        local success, result = pcall(function()
+            return lipc_handle:access_hash_property("com.lab126.wifid", "createProfile", profile)
+        end)
+        if success then
+            result:destroy() -- destroy the returned empty ha
+        else
+            logger.warn("kindleSaveNetwork: failed to createProfile")
+        end
         profile:destroy()
         lipc_handle:close()
     end
@@ -125,9 +151,26 @@ local function kindleGetScanList()
         lipc_handle = lipc.open_no_name()
     end
     if lipc_handle then
-        if lipc_handle:get_string_property("com.lab126.wifid", "cmState") ~= "CONNECTED" then
+        local success, cm_state = pcall(function()
+            return lipc_handle:get_string_property("com.lab126.wifid", "cmState")
+        end)
+        if not success then
+            -- cmState may fail when the LIPC backend is temporarily unavailable (e.g., suspend/lock).
+            logger.warn("kindleGetScanList: failed to access cmState")
+        end
+        -- Fall back to scanList if cmState is unavailable or not CONNECTED (cm_state may be nil).
+        local need_scan = (not success) or (cm_state ~= "CONNECTED")
+        if need_scan then
             local ha_input = lipc_handle:new_hasharray()
-            local ha_results = lipc_handle:access_hash_property("com.lab126.wifid", "scanList", ha_input)
+            local success_scan, ha_results = pcall(function()
+                return lipc_handle:access_hash_property("com.lab126.wifid", "scanList", ha_input)
+            end)
+            if not success_scan then
+                logger.warn("kindleGetScanList: failed to access scanList")
+                ha_input:destroy()
+                lipc_handle:close()
+                return {}, nil
+            end
             if ha_results == nil then
                 -- Shouldn't really happen, access_hash_property will throw if LipcAccessHasharrayProperty failed
                 ha_input:destroy()
@@ -194,7 +237,14 @@ local function kindleScanThenGetResults()
     local done_scanning = false
     local wait_cnt = 80 -- 20s in chunks on 250ms
     while wait_cnt > 0 do
-        local scan_state = lipc_handle:get_string_property("com.lab126.wifid", "scanState")
+        local success, scan_state = pcall(function()
+            return lipc_handle:get_string_property("com.lab126.wifid", "scanState")
+        end)
+
+        if not success then
+            logger.warn("kindleScanThenGetResults: failed to get scanState, aborting scan")
+            break
+        end
 
         if scan_state == "idle" then
             done_scanning = true
@@ -364,6 +414,8 @@ local Kindle = Generic:extend{
     canHWDither = no,
     -- Device has an Ambient Light Sensor
     hasLightSensor = no,
+    -- Device has fancy gesture detection when tapping the *frame*
+    hasFancyTaps = no,
     -- The time the device went into suspend
     suspend_time = 0,
     framework_lipc_handle = frameworkStopped(),
@@ -459,7 +511,13 @@ function Kindle:initNetworkManager(NetworkMgr)
     end
 
     function NetworkMgr:getCurrentNetwork()
-        return { ssid = kindleGetCurrentProfile().essid }
+        local nw = kindleGetCurrentProfile()
+        if nw == nil then
+            logger.dbg("NetworkMgr:getCurrentNetwork: No current network profile found")
+            return nil
+        end
+        logger.dbg("NetworkMgr:getCurrentNetwork: Current network:", nw.essid)
+        return { ssid = nw.essid }
     end
 
     NetworkMgr.isWifiOn = NetworkMgr.sysfsWifiOn
@@ -483,14 +541,19 @@ function Kindle:openInputDevices()
         FBInkInput = { fbink_input_scan = function() end }
     end
     local dev_count = ffi.new("size_t[1]")
-    -- We care about: the touchscreen, a properly scaled stylus, pagination buttons, a home button and a fiveway.
-    local match_mask = bit.bor(C.INPUT_TOUCHSCREEN, C.INPUT_SCALED_TABLET, C.INPUT_PAGINATION_BUTTONS, C.INPUT_HOME_BUTTON, C.INPUT_DPAD)
+    -- We care about: the touchscreen, the raw WacomDigitizer tablet, a properly scaled stylus, pagination buttons, a home button, a fiveway; and the fancy "tap on frame" stuff.
+    local match_mask = bit.bor(C.INPUT_TOUCHSCREEN, C.INPUT_TABLET, C.INPUT_SCALED_TABLET, C.INPUT_PAGINATION_BUTTONS, C.INPUT_HOME_BUTTON, C.INPUT_DPAD, C.INPUT_KINDLE_FRAME_TAP)
     local devices = FBInkInput.fbink_input_scan(match_mask, 0, 0, dev_count)
     if devices ~= nil then
         for i = 0, tonumber(dev_count[0]) - 1 do
             local dev = devices[i]
             if dev.matched then
                 self.input:fdopen(tonumber(dev.fd), ffi.string(dev.path), ffi.string(dev.name))
+
+                -- Automagically flip the hasFancyTaps cap
+                if bit.band(dev.type, C.INPUT_KINDLE_FRAME_TAP) ~= 0 then
+                    self.hasFancyTaps = yes
+                end
             end
         end
         C.free(devices)
@@ -601,6 +664,15 @@ function Kindle:init()
 
     -- Auto-detect & open input devices
     self:openInputDevices()
+
+    -- Deal with the fancy "double-tap on the device frame" thingy, c.f., #14461
+    if self:hasFancyTaps() then
+        -- Make sure we setup key handlers, in case the device is otherwise touch-only
+        self.hasKeys = yes
+
+        -- And that we map the double-tap keycode properly, because, sure, F7, why not, lab126...
+        self.input.event_map[65] = "RPgFwd"
+    end
 
     -- Follow user preference for the hall effect sensor's state
     if self.powerd:hasHallSensor() then
@@ -774,6 +846,12 @@ function Kindle:readyToSuspend(delay)
     logger.dbg("Kindle:readyToSuspend", delay)
     self.powerd:readyToSuspend(delay)
     self.suspend_time = time.boottime_or_realtime_coarse()
+end
+
+function Kindle:isStartupScriptUpToDate()
+    local md5 = require("ffi/MD5")
+    -- Compare the hash of the *active* script to the *potential* one.
+    return md5.sumFile("/var/tmp/koreader.sh") == md5.sumFile("koreader.sh")
 end
 
 function Kindle:UIManagerReady(uimgr)
@@ -1815,7 +1893,7 @@ function KindleTouch:exit()
         -- fake a touch event
         if self.touch_dev then
             local width, height = self.screen:getScreenWidth(), self.screen:getScreenHeight()
-            require("ffi/input").fakeTapInput(self.touch_dev,
+            require("libs/libkoreader-input").fakeTapInput(self.touch_dev,
                 math.min(width, height)/2,
                 math.max(width, height)-30
             )
@@ -1897,7 +1975,7 @@ local pw5_set = Set { "1Q0", "1PX", "1VD", "21A", "2BJ", "2DK" }
 local pw5se_set = Set { "1LG", "219", "2BH" }
 local kt5_set = Set { "22D", "25T", "23A", "2AQ", "2AP", "1XH", "22C" }
 local ks_set = Set { "27J", "2BL", "263", "227", "2BM", "23L", "23M", "270" }
-local kcs_set = Set { "3H2", "3H4", "3H6", "3H7", "3H9", "3JT", "3J6", "456", "34X", "3HB" }
+local kcs_set = Set { "3H2", "3H4", "3H6", "3H7", "3H9", "3JT", "3J6", "455", "456", "4EP", "34X", "3HB" }
 local kt6_set = Set { "A89", "3L2", "3L3", "3L4", "3L5", "3L6", "3KM" }
 local pw6_set = Set { "33W", "33X", "346", "349", "3H3", "3H5", "3H8", "3HA", "3J5", "3JS" } --- some of these are probably SE :/
 local ks2_set = Set { "3V0", "3V1", "3X5", "3UV", "3X4", "3X3", "41E", "410" }

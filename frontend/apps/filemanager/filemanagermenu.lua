@@ -384,6 +384,15 @@ To:
                 separator = true,
             },
             {
+                text = _("Ask to open files"),
+                checked_func = function()
+                    return G_reader_settings:isTrue("file_ask_to_open")
+                end,
+                callback = function()
+                    G_reader_settings:flipNilOrFalse("file_ask_to_open")
+                end,
+            },
+            {
                 text = _("Show collection mark"),
                 checked_func = function()
                     return G_reader_settings:hasNot("collection_show_mark")
@@ -468,7 +477,7 @@ To:
         text = _("Folders and files mixed"),
         enabled_func = function()
             local collate = FileChooser:getCollate()
-            return collate.can_collate_mixed
+            return collate.can_collate_mixed or false
         end,
         checked_func = function()
             local collate = FileChooser:getCollate()
@@ -811,13 +820,7 @@ To:
     self.menu_items.cloud_storage = {
         text = _("Cloud storage"),
         callback = function()
-            local cloud_storage = require("apps/cloudstorage/cloudstorage"):new{}
-            UIManager:show(cloud_storage)
-            local filemanagerRefresh = function() self.ui:onRefresh() end
-            function cloud_storage:onClose()
-                filemanagerRefresh()
-                UIManager:close(cloud_storage)
-            end
+            self:onShowCloudStorage()
         end,
     }
 
@@ -864,7 +867,7 @@ To:
             remember = false,
             callback = function()
                 self:onCloseFileManagerMenu()
-                self.ui:tapPlus()
+                self.ui:onShowPlusMenu()
             end,
         }
     end
@@ -957,6 +960,7 @@ function FileManagerMenu:getSortingMenuTable()
             callback = function()
                 self.ui:onSetSortBy(k)
             end,
+            radio = true,
         })
     end
     table.sort(sub_item_table, function(a, b) return a.menu_order < b.menu_order end)
@@ -987,6 +991,7 @@ function FileManagerMenu:getStartWithMenuTable()
             callback = function()
                 G_reader_settings:saveSetting("start_with", v[2])
             end,
+            radio = true,
         })
     end
     return {
@@ -1003,18 +1008,6 @@ function FileManagerMenu:getStartWithMenuTable()
 end
 
 function FileManagerMenu:exitOrRestart(callback, force)
-    -- Only restart sets a callback, which suits us just fine for this check ;)
-    if callback and not force and not Device:isStartupScriptUpToDate() then
-        UIManager:show(ConfirmBox:new{
-            text = _("KOReader's startup script has been updated. You'll need to completely exit KOReader to finalize the update."),
-            ok_text = _("Restart anyway"),
-            ok_callback = function()
-                self:exitOrRestart(callback, true)
-            end,
-        })
-        return
-    end
-
     UIManager:close(self.menu_container)
     self.ui:onClose()
     if callback then
@@ -1129,6 +1122,12 @@ end
 
 function FileManagerMenu:registerToMainMenu(widget)
     table.insert(self.registered_widgets, widget)
+end
+
+function FileManagerMenu:onShowCloudStorage()
+    local CloudStorage = require("apps/cloudstorage/cloudstorage")
+    UIManager:show(CloudStorage:new{ ui = self.ui })
+    return true
 end
 
 return FileManagerMenu

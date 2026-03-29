@@ -1,6 +1,7 @@
 local BD = require("ui/bidi")
-local BlitBuffer = require("ffi/blitbuffer")
+local Blitbuffer = require("ffi/blitbuffer")
 local ButtonDialog = require("ui/widget/buttondialog")
+local ButtonSelector = require("ui/widget/buttonselector")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local DoubleSpinWidget = require("ui/widget/doublespinwidget")
@@ -10,7 +11,6 @@ local GestureDetector = require("device/gesturedetector")
 local InfoMessage = require("ui/widget/infomessage")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local Notification = require("ui/widget/notification")
-local RadioButtonWidget = require("ui/widget/radiobuttonwidget")
 local SpinWidget = require("ui/widget/spinwidget")
 local TextViewer = require("ui/widget/textviewer")
 local Translator = require("ui/translator")
@@ -40,6 +40,36 @@ local ReaderHighlight = InputContainer:extend{
         {_("Gray"), "gray"},
     },
 }
+
+function ReaderHighlight:getHighlightColorString(color_name)
+    for _, color in ipairs(self.highlight_colors) do
+        if color_name == color[2] then
+            return color[1]
+        end
+    end
+    return color_name -- unknown
+end
+
+function ReaderHighlight:getHighlightColorList()
+    local color_list = {}
+    for i, color in ipairs(self.highlight_colors) do
+        color_list[i] = self:getHighlightColor(color[2])
+    end
+    return color_list
+end
+
+function ReaderHighlight:getHighlightColor(color_name)
+    local color = Blitbuffer.colorFromName(color_name)
+    if color then
+        if Screen.night_mode then
+            local r, g, b = Blitbuffer.HIGHLIGHT_COLORS[color_name]:match("#(..)(..)(..)")
+            return Blitbuffer.colorFromString(string.format("#%02x%02x%02x",
+                255 - tonumber(r, 16), 255 - tonumber(g, 16), 255 - tonumber(b, 16)))
+        end
+        return color
+    end
+    return Blitbuffer.gray(G_reader_settings:readSetting("highlight_lighten_factor") or 0.2)
+end
 
 local function inside_box(pos, box)
     if pos then
@@ -97,10 +127,13 @@ function ReaderHighlight:init()
                 enabled = Device:hasClipboard(),
                 callback = function()
                     Device.input.setClipboardText(util.cleanupSelectedText(this.selected_text.text))
-                    this:onClose()
+                    this:onClose(true)
                     UIManager:show(Notification:new{
                         text = _("Selection copied to clipboard."),
                     })
+                    UIManager:scheduleIn(G_defaults:readSetting("DELAY_CLEAR_HIGHLIGHT_S"), function()
+                        this:clear()
+                    end)
                 end,
             }
         end,
@@ -134,7 +167,7 @@ function ReaderHighlight:init()
                 text = _("Dictionary"),
                 callback = function()
                     this:lookupDict(index)
-                    -- We don't call this:onClose(), same reason as above
+                    this:onClose(true) -- keep highlight for dictionary lookup
                 end,
             }
         end,
@@ -445,11 +478,15 @@ function ReaderHighlight:addToMainMenu(menu_items)
         end,
         keep_menu_open = true,
         callback = function(touchmenu_instance) -- set color for new highlights in this book
-            local function apply_color(color)
-                self.view.highlight.saved_color = color
-                touchmenu_instance:updateItems()
-            end
-            self:showHighlightColorDialog(apply_color)
+            UIManager:show(ButtonSelector:new{
+                current_value = self.view.highlight.saved_color,
+                values = self.highlight_colors,
+                bg_colors = self:getHighlightColorList(),
+                callback = function(value)
+                    self.view.highlight.saved_color = value
+                    touchmenu_instance:updateItems()
+                end,
+            })
         end,
         hold_callback = function(touchmenu_instance) -- set color for new highlights in new books
             G_reader_settings:saveSetting("highlight_color", self.view.highlight.saved_color)
@@ -524,7 +561,17 @@ function ReaderHighlight:addToMainMenu(menu_items)
             end
         end,
         callback = function()
-            self:showNoteMarkerDialog()
+            UIManager:show(ButtonSelector:new{
+                current_value = self.view.highlight.note_mark or "none",
+                values = note_mark,
+                keep_open_on_apply = true,
+                callback = function(value)
+                    self.view.highlight.note_mark = value ~= "none" and value or nil
+                    G_reader_settings:saveSetting("highlight_note_marker", self.view.highlight.note_mark)
+                    self.view:setupNoteMarkPosition()
+                    UIManager:setDirty(self.dialog, "ui")
+                end,
+            })
         end,
         separator = true,
     })
@@ -729,6 +776,7 @@ If you wish your highlights to be saved in the document, just move it to a writa
             checked_func = function()
                 return G_reader_settings:readSetting("highlight_dialog_position", "center") == v[2]
             end,
+            radio = true,
             callback = function()
                 G_reader_settings:saveSetting("highlight_dialog_position", v[2])
             end,
@@ -1020,7 +1068,7 @@ function ReaderHighlight:onTap(_, ges)
     end
     if ges and #self.view.highlight.visible_boxes > 0 then
         local pos = self.view:screenToPageTransform(ges.pos)
-        local highlights_tapped = {}
+        local highlights_tapped, highlights_added = {}, {}
         for _, box in ipairs(self.view.highlight.visible_boxes) do
             if inside_box(pos, box.rect) then
                 if self.select_mode then
@@ -1034,7 +1082,9 @@ function ReaderHighlight:onTap(_, ges)
                         end
                         return true
                     end
-                else
+                elseif not highlights_added[box.index] then
+                    -- a highlight may contain overlapping boxes, avoid double adding
+                    highlights_added[box.index] = true
                     table.insert(highlights_tapped, box.index)
                 end
             end
@@ -1338,7 +1388,7 @@ function ReaderHighlight:showHighlightNoteOrDialog(index)
                             annotation.note = nil
                             self.ui:handleEvent(Event:new("AnnotationsModified",
                                     { annotation, nb_highlights_added = 1, nb_notes_added = -1 }))
-                            self:writePdfAnnotation("content", annotation, nil)
+                            self:writePdfAnnotation("content", annotation, "")
                             if self.view.highlight.note_mark then -- refresh note marker
                                 UIManager:setDirty(self.dialog, "ui")
                             end
@@ -1385,6 +1435,7 @@ function ReaderHighlight:showHighlightDialog(index)
         start_prev, start_next = start_next, start_prev
         end_prev, end_next = end_next, end_prev
     end
+    local move_by_char = false
     local edit_highlight_dialog
     local buttons = {
         {
@@ -1438,9 +1489,10 @@ function ReaderHighlight:showHighlightDialog(index)
                 text = start_prev,
                 enabled = change_boundaries_enabled,
                 callback = function()
-                    self:updateHighlight(index, 0, -1, false)
+                    self:updateHighlight(index, 0, -1, move_by_char)
                 end,
                 hold_callback = function()
+                    move_by_char = not move_by_char
                     self:updateHighlight(index, 0, -1, true)
                 end,
             },
@@ -1448,9 +1500,10 @@ function ReaderHighlight:showHighlightDialog(index)
                 text = start_next,
                 enabled = change_boundaries_enabled,
                 callback = function()
-                    self:updateHighlight(index, 0, 1, false)
+                    self:updateHighlight(index, 0, 1, move_by_char)
                 end,
                 hold_callback = function()
+                    move_by_char = not move_by_char
                     self:updateHighlight(index, 0, 1, true)
                 end,
             },
@@ -1458,9 +1511,10 @@ function ReaderHighlight:showHighlightDialog(index)
                 text = end_prev,
                 enabled = change_boundaries_enabled,
                 callback = function()
-                    self:updateHighlight(index, 1, -1, false)
+                    self:updateHighlight(index, 1, -1, move_by_char)
                 end,
                 hold_callback = function()
+                    move_by_char = not move_by_char
                     self:updateHighlight(index, 1, -1, true)
                 end,
             },
@@ -1468,9 +1522,10 @@ function ReaderHighlight:showHighlightDialog(index)
                 text = end_next,
                 enabled = change_boundaries_enabled,
                 callback = function()
-                    self:updateHighlight(index, 1, 1, false)
+                    self:updateHighlight(index, 1, 1, move_by_char)
                 end,
                 hold_callback = function()
+                    move_by_char = not move_by_char
                     self:updateHighlight(index, 1, 1, true)
                 end,
             },
@@ -1690,7 +1745,10 @@ function ReaderHighlight:onHold(arg, ges)
     end
 
     -- otherwise, we must be holding on text
-    if self.view.highlight.disabled then return false end -- Long-press action "Do nothing" checked
+    if self.view.highlight.disabled then -- Long-press action "Do nothing" checked
+        self.hold_pos = nil
+        return false
+    end
     local ok, word = pcall(self.ui.document.getWordFromPosition, self.ui.document, self.hold_pos)
     if ok and word then
         logger.dbg("selected word:", word)
@@ -1884,12 +1942,6 @@ function ReaderHighlight:onHoldPan(_, ges)
 
     local old_text = self.selected_text and self.selected_text.text
     self.selected_text = self.ui.document:getTextFromPositions(self.hold_pos, self.holdpan_pos)
-    if self.selected_text and self.selected_text.sboxes and #self.selected_text.sboxes == 0 then
-        -- abort highlighting if crengine doesn't provide sboxes for current positions
-        -- may happen in TXT files with disabled txt_preformatted
-        self:clear()
-        return true
-    end
     self.is_word_selection = false
 
     if self.selected_text and self.selected_text.pos0 then
@@ -2092,7 +2144,7 @@ function ReaderHighlight:onHoldRelease()
                 self:onClose()
             elseif default_highlight_action == "dictionary" then
                 self:lookupDict()
-                self:onClose()
+                self:onClose(true) -- keep selected text
             elseif default_highlight_action == "search" then
                 self:onHighlightSearch()
                 -- No self:onClose() to not remove the selected text
@@ -2230,7 +2282,7 @@ function ReaderHighlight:saveHighlight(extend_to_sentence)
 end
 
 function ReaderHighlight:writePdfAnnotation(action, item, content)
-    if self.ui.rolling or not self.highlight_write_into_pdf then
+    if not (self.document.is_pdf and self.highlight_write_into_pdf and item.drawer) then
         return
     end
     logger.dbg("write to pdf document", action, item)
@@ -2288,7 +2340,7 @@ function ReaderHighlight:lookupDict(index)
                 word_boxes[i] = self.view:pageToScreenTransform(self.selected_text.pos0.page, box)
             end
         end
-        self.ui.dictionary:onLookupWord(util.cleanupSelectedText(self.selected_text.text), false, word_boxes)
+        self.ui.dictionary:onLookupWord(util.cleanupSelectedText(self.selected_text.text), false, word_boxes, self)
     end
 end
 
@@ -2319,130 +2371,43 @@ end
 
 function ReaderHighlight:editHighlightStyle(index)
     local item = self.ui.annotation.annotations[index]
-    local apply_drawer = function(drawer)
-        self:writePdfAnnotation("delete", item)
-        item.drawer = drawer
-        if self.ui.paging then
-            self:writePdfAnnotation("save", item)
-            if item.note then
-                self:writePdfAnnotation("content", item, item.note)
+    UIManager:show(ButtonSelector:new{
+        current_value = item.drawer,
+        values = highlight_style,
+        callback = function(value)
+            self:writePdfAnnotation("delete", item)
+            item.drawer = value
+            if self.ui.paging then
+                self:writePdfAnnotation("save", item)
+                if item.note then
+                    self:writePdfAnnotation("content", item, item.note)
+                end
             end
-        end
-        UIManager:setDirty(self.dialog, "ui")
-        self.ui:handleEvent(Event:new("AnnotationsModified", { item }))
-    end
-    self:showHighlightStyleDialog(apply_drawer, index)
+            UIManager:setDirty(self.dialog, "ui")
+            self.ui:handleEvent(Event:new("AnnotationsModified", { item }))
+        end,
+    })
 end
 
 function ReaderHighlight:editHighlightColor(index)
     local item = self.ui.annotation.annotations[index]
-    local apply_color = function(color)
-        self:writePdfAnnotation("delete", item)
-        item.color = color
-        if self.ui.paging then
-            self:writePdfAnnotation("save", item)
-            if item.note then
-                self:writePdfAnnotation("content", item, item.note)
+    UIManager:show(ButtonSelector:new{
+        current_value = item.color,
+        values = self.highlight_colors,
+        bg_colors = self:getHighlightColorList(),
+        callback = function(value)
+            self:writePdfAnnotation("delete", item)
+            item.color = value
+            if self.ui.paging then
+                self:writePdfAnnotation("save", item)
+                if item.note then
+                    self:writePdfAnnotation("content", item, item.note)
+                end
             end
-        end
-        UIManager:setDirty(self.dialog, "ui")
-        self.ui:handleEvent(Event:new("AnnotationsModified", { item }))
-    end
-    self:showHighlightColorDialog(apply_color, item)
-end
-
-function ReaderHighlight:showHighlightStyleDialog(caller_callback, index)
-    local item_drawer = index and self.ui.annotation.annotations[index].drawer
-    local dialog
-    local buttons = {}
-    for i, v in ipairs(highlight_style) do
-        buttons[i] = {{
-            text = v[1] .. (v[2] == item_drawer and "  ✓" or ""),
-            menu_style = true,
-            callback = function()
-                caller_callback(v[2])
-                UIManager:close(dialog)
-            end,
-        }}
-    end
-    if index then -- called from ReaderHighlight:editHighlightStyle()
-        table.insert(buttons, {}) -- separator
-        table.insert(buttons, {{
-            text = _("Highlight menu"),
-            callback = function()
-                self:showHighlightDialog(index)
-                UIManager:close(dialog)
-            end,
-        }})
-    end
-    dialog = ButtonDialog:new{
-        width_factor = 0.4,
-        buttons = buttons,
-    }
-    UIManager:show(dialog)
-end
-
-function ReaderHighlight:showHighlightColorDialog(caller_callback, item)
-    local default_color, curr_color, keep_shown_on_apply
-    if item then -- called from ReaderHighlight:editHighlightColor()
-        default_color = self.view.highlight.saved_color
-        curr_color = item.color or default_color
-        keep_shown_on_apply = true
-    else
-        default_color = G_reader_settings:readSetting("highlight_color") or self._fallback_color
-        curr_color = self.view.highlight.saved_color
-    end
-    local radio_buttons = {}
-    for _, v in ipairs(self.highlight_colors) do
-        table.insert(radio_buttons, {
-            {
-                text = v[1],
-                checked = curr_color == v[2],
-                bgcolor = BlitBuffer.colorFromName(v[2])
-                       or BlitBuffer.Color8(bit.bxor(0xFF * self.view.highlight.lighten_factor, 0xFF)),
-                provider = v[2],
-            },
-        })
-    end
-    UIManager:show(RadioButtonWidget:new{
-        title_text = _("Highlight color"),
-        width_factor = 0.5,
-        keep_shown_on_apply = keep_shown_on_apply,
-        radio_buttons = radio_buttons,
-        default_provider = default_color,
-        callback = function(radio)
-            caller_callback(radio.provider)
+            UIManager:setDirty(self.dialog, "ui")
+            self.ui:handleEvent(Event:new("AnnotationsModified", { item }))
         end,
-        -- This ensures the waveform mode will be upgraded to a Kaleido wfm on compatible devices
-        colorful = true,
-        dithered = true,
     })
-end
-
-function ReaderHighlight:showNoteMarkerDialog()
-    local notemark = self.view.highlight.note_mark or "none"
-    local dialog
-    local buttons = {}
-    for i, v in ipairs(note_mark) do
-        local mark = v[2]
-        buttons[i] = {{
-            text = v[1] .. (mark == notemark and "  ✓" or ""),
-            menu_style = true,
-            callback = function()
-                self.view.highlight.note_mark = mark ~= "none" and mark or nil
-                G_reader_settings:saveSetting("highlight_note_marker", self.view.highlight.note_mark)
-                self.view:setupNoteMarkPosition()
-                UIManager:setDirty(self.dialog, "ui")
-                UIManager:close(dialog)
-                self:showNoteMarkerDialog()
-            end,
-        }}
-    end
-    dialog = ButtonDialog:new{
-        width_factor = 0.4,
-        buttons = buttons,
-    }
-    UIManager:show(dialog)
 end
 
 function ReaderHighlight:startSelection(index)
@@ -2504,7 +2469,7 @@ function ReaderHighlight:extendSelection()
         -- pos0 and pos1 are in order within highlights
         new_pos0 = self.ui.document:compareXPointers(item1.pos0, item2_pos0) == 1 and item1.pos0 or item2_pos0
         new_pos1 = self.ui.document:compareXPointers(item1.pos1, item2_pos1) == 1 and item2_pos1 or item1.pos1
-        new_pboxes = self.document:getScreenBoxesFromPositions(new_pos0, new_pos1)
+        new_pboxes = self.document:getScreenBoxesFromPositions(new_pos0, new_pos1, true)
         -- true to draw
         new_text = self.ui.document:getTextFromXPointers(new_pos0, new_pos1, true)
     end
@@ -2616,6 +2581,99 @@ function ReaderHighlight:getSavedExtendedHighlightPage(highlight, page, index)
     return item
 end
 
+-- PDF annotation type to KOReader drawer mapping
+local ANNOT_TYPE_DRAWER = {
+    [8]  = "lighten",    -- PDF_ANNOT_HIGHLIGHT
+    [9]  = "underscore", -- PDF_ANNOT_UNDERLINE
+    [10] = "underscore", -- PDF_ANNOT_SQUIGGLY (closest equivalent)
+    [11] = "strikeout",  -- PDF_ANNOT_STRIKE_OUT
+}
+
+function ReaderHighlight:_isDuplicateAnnotation(page, pboxes)
+    for _, item in ipairs(self.ui.annotation.annotations) do
+        if item.page == page and item.pboxes and #item.pboxes == #pboxes then
+            local match = true
+            for i, box in ipairs(pboxes) do
+                local existing = item.pboxes[i]
+                if math.abs(box.x - existing.x) > 1
+                or math.abs(box.y - existing.y) > 1
+                or math.abs(box.w - existing.w) > 1
+                or math.abs(box.h - existing.h) > 1 then
+                    match = false
+                    break
+                end
+            end
+            if match then return true end
+        end
+    end
+    return false
+end
+
+-- Imports PDF embedded markup annotations as KOReader annotations.
+-- Two-phase approach: delete originals from PDF first, then import.
+-- avoids ambiguity when write-into-pdf re-creates the annotations.
+-- (For pdf documents only, reflow mode must be off)
+function ReaderHighlight:importEmbeddedAnnotations(annotations)
+    local rotation = Screen:getRotationMode()
+    local zoom = self.ui.zooming:getZoom(1)
+    local count = 0
+    local skipped = 0
+
+    -- Phase 1: Identify annotations to import and delete originals from PDF
+    local to_import = {}
+    for page, page_annots in pairs(annotations) do
+        for _, annot in ipairs(page_annots) do
+            if self:_isDuplicateAnnotation(page, annot.boxes) then
+                skipped = skipped + 1
+            else
+                table.insert(to_import, { page = page, annot = annot })
+                self.document:deleteHighlight(page, { pboxes = annot.boxes })
+            end
+        end
+    end
+
+    -- Phase 2: Import collected annotations
+    for _, entry in ipairs(to_import) do
+        local annot = entry.annot
+        local page = entry.page
+        local hl_pboxes = annot.boxes
+        local first_box = hl_pboxes[1]
+        local pos0 = {
+            page = page,
+            rotation = rotation,
+            zoom = zoom,
+            x = first_box.x + 1, -- inside the box
+            y = first_box.y + 1, -- ditto
+        }
+        local last_box = hl_pboxes[#hl_pboxes]
+        local pos1 = {
+            page = page,
+            rotation = rotation,
+            zoom = zoom,
+            x = last_box.x + last_box.w - 2, -- ditto
+            y = last_box.y + last_box.h - 2, -- ditto
+        }
+        local text = self.document:getTextFromPositions(pos0, pos1)
+        local contents = annot.contents
+        if contents == "" then
+            contents = nil
+        end
+        self.selected_text = {
+            pos0 = pos0,
+            pos1 = pos1,
+            pboxes = hl_pboxes,
+            text = text and text.text or "",
+            note = contents,
+            drawer = ANNOT_TYPE_DRAWER[annot.type],
+        }
+        self:saveHighlight()
+        count = count + 1
+    end
+
+    self.selected_text = nil
+    return count, skipped
+end
+
 function ReaderHighlight:onReadSettings(config)
     self.view.highlight.saved_drawer = config:readSetting("highlight_drawer")
         or G_reader_settings:readSetting("highlight_drawing_style") or self.view.highlight.saved_drawer
@@ -2661,13 +2719,15 @@ function ReaderHighlight:onSaveSettings()
     self.ui.doc_settings:saveSetting("panel_zoom_enabled", self.panel_zoom_enabled)
 end
 
-function ReaderHighlight:onClose()
+function ReaderHighlight:onClose(keep_highlight)
     if self.highlight_dialog then
         UIManager:close(self.highlight_dialog)
         self.highlight_dialog = nil
     end
     -- clear highlighted text
-    self:clear()
+    if not keep_highlight then
+        self:clear()
+    end
 end
 
 -- dpad/keys support
@@ -2766,7 +2826,6 @@ function ReaderHighlight:onHighlightPress(skip_tap_check)
             pos.y + pos.h / 2 - self._current_indicator_pos.h / 2
         )
     end
-    UIManager:setDirty(self.dialog, "ui", self._current_indicator_pos)
     return true
 end
 
@@ -2805,6 +2864,7 @@ function ReaderHighlight:onStartHighlightIndicator()
 end
 
 function ReaderHighlight:onStopHighlightIndicator(need_clear_selection)
+    if not self._current_indicator_pos then return false end
     -- If we're in select mode and user presses back, end the selection
     if self.select_mode and self.highlight_idx then
         self.select_mode = false
@@ -2815,19 +2875,17 @@ function ReaderHighlight:onStopHighlightIndicator(need_clear_selection)
         end
         self.highlight_idx = nil
     end
-    if self._current_indicator_pos then
-        local rect = self._current_indicator_pos
-        self._previous_indicator_pos = rect
-        self._start_indicator_highlight = false
-        self._current_indicator_pos = nil
-        self.view.highlight.indicator = nil
-        UIManager:setDirty(self.dialog, "ui", rect)
-        if need_clear_selection then
-            self:clear()
-        end
-        return true
+
+    local rect = self._current_indicator_pos
+    self._previous_indicator_pos = rect
+    self._start_indicator_highlight = false
+    self._current_indicator_pos = nil
+    self.view.highlight.indicator = nil
+    UIManager:setDirty(self.dialog, "ui", rect)
+    if need_clear_selection then
+        self:clear()
     end
-    return false
+    return true
 end
 
 function ReaderHighlight:onMoveHighlightIndicator(args)

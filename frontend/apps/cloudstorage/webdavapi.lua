@@ -27,21 +27,9 @@ function WebDavApi.rtrim_slashes(s)
     return s:sub(1, n)
 end
 
--- Variant of util.urlEncode that doesn't encode the /
-function WebDavApi.urlEncode(url_data)
-    local char_to_hex = function(c)
-        return string.format("%%%02X", string.byte(c))
-    end
-    if url_data == nil then
-        return
-    end
-    url_data = url_data:gsub("([^%w%/%-%.%_%~%!%*%'%(%)])", char_to_hex)
-    return url_data
-end
-
 -- Append path to address with a slash separator, trimming any unwanted slashes in the process.
 function WebDavApi:getJoinedPath(address, path)
-    local path_encoded = self.urlEncode(path) or ""
+    local path_encoded = util.urlEncode(path, "/") or ""
     -- Strip leading & trailing slashes from `path`
     local sane_path = self.trim_slashes(path_encoded)
     -- Strip trailing slashes from `address` for now
@@ -61,10 +49,11 @@ function WebDavApi:listFolder(address, user, pass, folder_path, folder_mode)
     address = self.rtrim_slashes(address)
     -- Join our final URL, which *must* have a trailing / (it's a URL)
     -- This is where we deviate from getJoinedPath ;).
-    local webdav_url = address .. "/" .. self.urlEncode(path)
+    local webdav_url = address .. "/" .. util.urlEncode(path, "/")
     if webdav_url:sub(-1) ~= "/" then
         webdav_url = webdav_url .. "/"
     end
+    local webdav_url_path = self.trim_slashes(webdav_url:match("^https?://[^/]*(.*)$") or webdav_url)
 
     local sink = {}
     local data = [[<?xml version="1.0"?><a:propfind xmlns:a="DAV:"><a:prop><a:resourcetype/><a:getcontentlength/></a:prop></a:propfind>]]
@@ -104,7 +93,7 @@ function WebDavApi:listFolder(address, user, pass, folder_path, folder_mode)
             -- <d:href> is the path and filename of the entry.
             local item_fullpath = item:match("<[^:]*:href[^>]*>(.*)</[^:]*:href>")
             local item_name = ffiUtil.basename(util.htmlEntitiesToUtf8(util.urlDecode(item_fullpath)))
-            local is_current_dir = self.trim_slashes(item_fullpath) == path
+            local is_current_dir = self.trim_slashes(item_fullpath) == webdav_url_path
             local is_not_collection = item:find("<[^:]*:resourcetype%s*/>") or
                                       item:find("<[^:]*:resourcetype></[^:]*:resourcetype>")
             local item_path = path .. "/" .. item_name

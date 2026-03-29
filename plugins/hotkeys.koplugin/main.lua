@@ -87,6 +87,9 @@ end
     @return (boolean) Returns true if the hotkey action was successfully executed, otherwise returns nil.
 ]]
 function HotKeys:onHotkeyAction(hotkey)
+    -- Note: we could have started text selection and then trigger a reflow through hotkeys (e.g., increase
+    --       font-size) which will cause pandemonium to ensue (invalid coordinates).
+    if self.ui.highlight then self.ui.highlight:onStopHighlightIndicator(true) end
     local hotkey_action_list = self.hotkeys[hotkey]
     local context = self.is_docless and "FileManager" or "Reader"
     if hotkey_action_list == nil then
@@ -196,6 +199,7 @@ function HotKeys:genMenu(hotkey)
                 return util.tableEquals(self.hotkeys[hotkey], self.defaults[hotkey])
             end,
             check_callback_updates_menu = true,
+            radio = true,
             callback = function(touchmenu_instance)
                 local function do_remove()
                     self.hotkeys[hotkey] = util.tableDeepCopy(self.defaults[hotkey])
@@ -212,6 +216,7 @@ function HotKeys:genMenu(hotkey)
             return self.hotkeys[hotkey] == nil or next(self.hotkeys[hotkey]) == nil
         end,
         check_callback_updates_menu = true,
+        radio = true,
         callback = function(touchmenu_instance)
             local function do_remove()
                 self.hotkeys[hotkey] = nil

@@ -124,6 +124,7 @@ local order = {
         "exporter",
         "statistics",
         "cloud_storage",
+        "cloudstorage",
         "move_to_archive",
         "wallabag",
         "news_downloader",
@@ -173,6 +174,7 @@ local order = {
         "----------------------------",
         "favorites",
         "collections",
+        "bookmark_browser",
         "----------------------------",
         "mass_storage_actions", -- if Device:canToggleMassStorage()
         "----------------------------",

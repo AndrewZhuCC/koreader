@@ -165,14 +165,14 @@ function FileManager:setupLayout()
             file_manager.selected_files[item.path] = item.dim
             self:updateItems(1, true)
         else
-            file_manager:openFile(item.path)
+            filemanagerutil.openFile(file_manager, item.path)
         end
         return true
     end
 
     function file_chooser:onFileHold(item)
         if file_manager.selected_files then
-            file_manager:tapPlus()
+            file_manager:onShowPlusMenu()
         else
             self:showFileDialog(item)
         end
@@ -285,6 +285,15 @@ function FileManager:setupLayout()
                 table.insert(buttons, {
                     FileManagerConverter:genConvertButton(file, close_dialog_callback, refresh_callback)
                 })
+            end
+            if been_opened then
+                local annotations = doc_settings_or_file:readSetting("annotations")
+                if annotations and #annotations > 0 then
+                    table.insert(buttons, {
+                        file_manager.collections:genExportHighlightsButton({ [file] = true }, close_dialog_callback),
+                        file_manager.collections:genBookmarkBrowserButton({ [file] = true }, close_dialog_callback),
+                    })
+                end
             end
             table.insert(buttons, {
                 {
@@ -498,11 +507,6 @@ function FileManager.getMenuInstance()
     return FileManager.instance.file_chooser
 end
 
-function FileManager:onShowPlusMenu()
-    self:tapPlus()
-    return true
-end
-
 function FileManager:onToggleSelectMode(do_refresh)
     logger.dbg("toggle select mode")
     if self.selected_files then
@@ -520,16 +524,15 @@ function FileManager:onToggleSelectMode(do_refresh)
     return true
 end
 
-function FileManager:tapPlus()
-    local plus_dialog
+function FileManager:getPlusDialogButtons()
     local function close_dialog_callback()
-        UIManager:close(plus_dialog)
+        UIManager:close(self.plus_dialog)
     end
 
     local title, buttons
     if self.selected_files then
         local function close_dialog_toggle_select_mode_callback()
-            UIManager:close(plus_dialog)
+            UIManager:close(self.plus_dialog)
             self:onToggleSelectMode(true)
         end
         local function toggle_select_mode_callback()
@@ -549,7 +552,7 @@ function FileManager:tapPlus()
                             text = _("Delete selected files?\nIf you delete a file, it is permanently lost."),
                             ok_text = _("Delete"),
                             ok_callback = function()
-                                UIManager:close(plus_dialog)
+                                UIManager:close(self.plus_dialog)
                                 self:deleteSelectedFiles()
                             end,
                         })
@@ -583,13 +586,8 @@ function FileManager:tapPlus()
                     close_dialog_callback, toggle_select_mode_callback, not actions_enabled),
             },
             {
-                {
-                    text = _("Export highlights"),
-                    enabled = (actions_enabled and self.exporter) and true or false,
-                    callback = function()
-                        self.exporter:exportFilesNotes(self.selected_files)
-                    end,
-                },
+                self.collections:genExportHighlightsButton(self.selected_files, close_dialog_callback, not actions_enabled),
+                self.collections:genBookmarkBrowserButton(self.selected_files, close_dialog_callback, not actions_enabled),
             },
             {}, -- separator
             {
@@ -597,7 +595,7 @@ function FileManager:tapPlus()
                     text = _("Deselect all"),
                     enabled = actions_enabled,
                     callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         for file in pairs (self.selected_files) do
                             self.selected_files[file] = nil
                         end
@@ -607,7 +605,7 @@ function FileManager:tapPlus()
                 {
                     text = _("Select all files in folder"),
                     callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         self.file_chooser:selectAllFilesInFolder(true)
                     end,
                 },
@@ -616,7 +614,7 @@ function FileManager:tapPlus()
                 {
                     text = _("Exit select mode"),
                     callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         self:onToggleSelectMode()
                     end,
                 },
@@ -624,7 +622,7 @@ function FileManager:tapPlus()
                     text = _("Show selected files list"),
                     enabled = actions_enabled,
                     callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         self:showSelectedFilesList()
                     end,
                 },
@@ -634,7 +632,7 @@ function FileManager:tapPlus()
                 {
                     text = _("New folder"),
                     callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         self:createFolder()
                     end,
                 },
@@ -659,7 +657,7 @@ function FileManager:tapPlus()
                 {
                     text = _("Select files"),
                     callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         self:onToggleSelectMode()
                     end,
                 },
@@ -668,7 +666,7 @@ function FileManager:tapPlus()
                 {
                     text = _("New folder"),
                     callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         self:createFolder()
                     end,
                 },
@@ -678,7 +676,7 @@ function FileManager:tapPlus()
                     text = _("Paste"),
                     enabled = self.clipboard and true or false,
                     callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         self:pasteFileFromClipboard()
                     end,
                 },
@@ -687,7 +685,7 @@ function FileManager:tapPlus()
                 {
                     text = _("Set as HOME folder"),
                     callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         self:setHome()
                     end
                 },
@@ -696,7 +694,7 @@ function FileManager:tapPlus()
                 {
                     text = _("Go to HOME folder"),
                     callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         self:onHome()
                     end
                 },
@@ -705,12 +703,12 @@ function FileManager:tapPlus()
                 {
                     text = _("Open random document"),
                     callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         -- any random document
                         self:openRandomFile(folder, false)
                     end,
                     hold_callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         -- only previously unopened
                         self:openRandomFile(folder, true)
                     end
@@ -732,7 +730,7 @@ function FileManager:tapPlus()
                             and _("Switch to SDCard") or _("Switch to internal storage")
                     end,
                     callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         if Device:isValidPath(folder) then
                             local ok, sd_path = Device:hasExternalSD()
                             if ok then
@@ -752,7 +750,7 @@ function FileManager:tapPlus()
                     text = _("Import files here"),
                     enabled = Device:isValidPath(folder),
                     callback = function()
-                        UIManager:close(plus_dialog)
+                        UIManager:close(self.plus_dialog)
                         Device.importFile(folder)
                     end,
                 },
@@ -767,12 +765,18 @@ function FileManager:tapPlus()
 
     end
 
-    plus_dialog = ButtonDialog:new{
+    return title, buttons
+end
+
+function FileManager:onShowPlusMenu()
+    local title, buttons = self:getPlusDialogButtons()
+    self.plus_dialog = ButtonDialog:new{
         title = title,
         title_align = "center",
         buttons = buttons,
     }
-    UIManager:show(plus_dialog)
+    UIManager:show(self.plus_dialog)
+    return true
 end
 
 function FileManager:reinit(path, focused_file)
@@ -1417,7 +1421,7 @@ function FileManager:showOpenWithDialog(file)
         return {{
             -- @translators %1 is the provider name, such as Cool Reader Engine or MuPDF.
             text = is_unsupported and T(_("%1 ~Unsupported"), provider.provider_name) or provider.provider_name,
-            checked = provider.provider == file_provider_key,
+            checked = not is_unsupported and provider.provider == file_provider_key,
             provider = provider,
         }}
     end
@@ -1428,8 +1432,8 @@ function FileManager:showOpenWithDialog(file)
             table.insert(radio_buttons, genRadioButton(provider.provider))
         end
     else
-        local provider = DocumentRegistry:getFallbackProvider()
-        table.insert(radio_buttons, genRadioButton(provider, true))
+        table.insert(radio_buttons, genRadioButton(DocumentRegistry.known_providers["mupdf"], true))
+        table.insert(radio_buttons, genRadioButton(DocumentRegistry.known_providers["crengine"], true))
     end
     for _, provider in ipairs(DocumentRegistry:getAuxProviders()) do -- auxiliary providers
         local is_filetype_supported
@@ -1517,7 +1521,7 @@ function FileManager:showOpenWithDialog(file)
                         ok_text = _("Always"),
                         ok_callback = function()
                             DocumentRegistry:setProvider(file, provider, false)
-                            self:openFile(file, provider)
+                            FileManager.openFile(self, file, provider)
                             UIManager:close(dialog)
                         end,
                     })
@@ -1527,12 +1531,12 @@ function FileManager:showOpenWithDialog(file)
                         ok_text = _("Always"),
                         ok_callback = function()
                             DocumentRegistry:setProvider(file, provider, true)
-                            self:openFile(file, provider)
+                            FileManager.openFile(self, file, provider)
                             UIManager:close(dialog)
                         end,
                     })
                 else -- open just once
-                    self:openFile(file, provider)
+                    FileManager.openFile(self, file, provider)
                     UIManager:close(dialog)
                 end
             end,
@@ -1548,7 +1552,7 @@ function FileManager:showOpenWithDialog(file)
     UIManager:show(dialog)
 end
 
-function FileManager:openFile(file, provider, doc_caller_callback, aux_caller_callback)
+function FileManager:openFile(file, provider, doc_caller_callback, aux_caller_callback, after_open_callback)
     local is_provider_forced = provider ~= nil
     provider = provider or DocumentRegistry:getProvider(file, true) -- include auxiliary
     if provider and provider.order then -- auxiliary
@@ -1565,7 +1569,7 @@ function FileManager:openFile(file, provider, doc_caller_callback, aux_caller_ca
             doc_caller_callback()
         end
         local ReaderUI = require("apps/reader/readerui")
-        ReaderUI:showReader(file, provider, nil, is_provider_forced)
+        ReaderUI:showReader(file, provider, nil, is_provider_forced, after_open_callback)
     end
 end
 

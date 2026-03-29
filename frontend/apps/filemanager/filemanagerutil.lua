@@ -53,13 +53,13 @@ function filemanagerutil.splitFileNameType(filepath)
     return filename_without_suffix, filetype
 end
 
-function filemanagerutil.getRandomFile(dir, match_func)
+function filemanagerutil.getRandomFile(dir, match_func, max_files)
     local files = {}
     util.findFiles(dir, function(file)
         if match_func(file) then
             table.insert(files, file)
         end
-    end, false)
+    end, false, max_files)
     if #files > 0 then
         math.randomseed(os.time())
         return files[math.random(#files)]
@@ -421,6 +421,42 @@ function filemanagerutil.showChooseDialog(title_header, caller_callback, current
         buttons = buttons,
     }
     UIManager:show(dialog)
+end
+
+function filemanagerutil.openFile(ui, file, caller_pre_callback, no_dialog)
+    local openFile = function()
+        if caller_pre_callback then
+            caller_pre_callback()
+        end
+        if ui.document then -- Reader
+            if ui.document.file ~= file then
+                local DocumentRegistry = require("document/documentregistry")
+                local provider = DocumentRegistry:getProvider(file, true) -- include auxiliary
+                if provider and provider.order then -- auxiliary
+                    -- keep the currently opened document, open the file over Reader
+                    if provider.callback then -- module
+                        provider.callback(file)
+                    else -- plugin
+                        ui[provider.provider]:openFile(file)
+                    end
+                else -- document
+                    ui:switchDocument(file)
+                end
+            end
+        else -- FM
+            ui:openFile(file)
+        end
+    end
+
+    if not no_dialog and G_reader_settings:isTrue("file_ask_to_open") then
+        UIManager:show(ConfirmBox:new{
+            text = _("Open this file?") .. "\n\n" .. BD.filename(file:match("([^/]+)$")),
+            ok_text = _("Open"),
+            ok_callback = openFile,
+        })
+    else
+        openFile()
+    end
 end
 
 return filemanagerutil

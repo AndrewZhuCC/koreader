@@ -91,7 +91,11 @@ function Wallabag:init()
     self.filter_starred                = self.wb_settings.data.wallabag.filter_starred or false
     self.ignore_tags                   = self.wb_settings.data.wallabag.ignore_tags or ""
     self.auto_tags                     = self.wb_settings.data.wallabag.auto_tags or ""
-    self.archive_finished              = self.wb_settings.data.wallabag.archive_finished or true
+    if self.wb_settings.data.wallabag.archive_finished == nil then
+        self.archive_finished = true
+    else
+        self.archive_finished = self.wb_settings.data.wallabag.archive_finished
+    end
     self.archive_read                  = self.wb_settings.data.wallabag.archive_read or false
     self.archive_abandoned             = self.wb_settings.data.wallabag.archive_abandoned or false
     self.delete_instead                = self.wb_settings.data.wallabag.delete_instead or false
@@ -737,7 +741,9 @@ end
 -- @treturn int 1 failed, 2 skipped, 3 downloaded
 function Wallabag:downloadArticle(article)
     local skip_article = false
+    logger.dbg("Wallabag:downloadArticle: article.title =", article.title)
     local title = util.getSafeFilename(article.title, self.directory, 230, 0)
+    logger.dbg("Wallabag:downloadArticle: local title =", title)
     local file_ext = ".epub"
     local item_url = "/api/entries/" .. article.id .. "/export.epub"
 
@@ -748,9 +754,12 @@ function Wallabag:downloadArticle(article)
     local mimetype = type(article.mimetype) == "string" and util.trim(article.mimetype:match("^[^;]*")) or nil
 
     if self.download_original_document then
+        logger.dbg("Wallabag:downloadArticle: local mimetype =", mimetype)
+        logger.dbg("Wallabag:downloadArticle: article.url =", article.url)
         if mimetype == "text/html" then
             logger.dbg("Wallabag:downloadArticle: not ignoring EPUB, because", article.url, "is HTML")
         elseif mimetype == nil then -- base ourselves on the file extension
+            logger.dbg("Wallabag:downloadArticle: mimetype = nil, using article.url instead")
             if util.getFileNameSuffix(article.url):lower():find("^html?$") then
                 logger.dbg("Wallabag:downloadArticle: not ignoring EPUB, because", article.url, "appears to be HTML")
             elseif DocumentRegistry:hasProvider(article.url) then
@@ -766,7 +775,7 @@ function Wallabag:downloadArticle(article)
             end
         elseif DocumentRegistry:hasProvider(nil, mimetype) then
             logger.dbg("Wallabag:downloadArticle: ignoring EPUB in favor of mimetype", mimetype)
-            file_ext = "." .. DocumentRegistry:mimeToExt(article.mimetype)
+            file_ext = "." .. DocumentRegistry:mimeToExt(mimetype)
             item_url = article.url
         else
             logger.dbg("Wallabag:downloadArticle: not ignoring EPUB, because there is no provider for", mimetype)
@@ -1118,6 +1127,23 @@ function Wallabag:processRemoteDeletes(remote_ids)
     return count
 end
 
+--- Returns true, if article should be archived/deleted on the Wallabag server.
+-- @tparam string entry_path Path to the article file
+function Wallabag:shouldUploadStatus(entry_path)
+  local doc_settings = DocSettings:open(entry_path)
+  local summary = doc_settings:readSetting("summary")
+  local status = summary and summary.status
+  local percent_finished = doc_settings:readSetting("percent_finished")
+  if status == "complete" then
+    return self.archive_finished
+  elseif status == "abandoned" then
+    return self.archive_abandoned
+  elseif percent_finished == 1 then -- 100% read
+    return self.archive_read
+  end
+  return false
+end
+
 --- Archive (or delete) locally finished articles on the Wallabag server.
 -- @tparam[opt] bool quiet Whether to supress the info message or not
 function Wallabag:uploadStatuses(quiet)
@@ -1153,17 +1179,8 @@ function Wallabag:uploadStatuses(quiet)
                         self:addTagsFromReview(entry_path)
                     end
 
-                    local doc_settings = DocSettings:open(entry_path)
-                    local summary = doc_settings:readSetting("summary")
-                    local status = summary and summary.status
-                    local percent_finished = doc_settings:readSetting("percent_finished")
-
-                    if (
-                        (status == "complete" and self.archive_finished)
-                        or (status == "abandoned" and self.archive_abandoned)
-                        or (percent_finished == 1 and self.archive_read)
-                    ) then
-                        logger.dbg("Wallabag:uploadStatuses: - has been finished, so archiving/deleting on remote…")
+                    if self:shouldUploadStatus(entry_path) then
+                        logger.dbg("Wallabag:uploadStatuses: - archiving/deleting on remote…")
 
                         if self:archiveArticle(entry_path) then
                             count_remote = count_remote + 1
@@ -1184,7 +1201,7 @@ function Wallabag:uploadStatuses(quiet)
                                 count_local = count_local + self:deleteLocalArticle(entry_path)
                             end -- if use local archive
                         end -- if not skip
-                    else -- not finished
+                    else -- not shouldUploadStatus
                         logger.dbg("Wallabag:uploadStatuses: - but has not been finished yet")
                     end -- if finished
                 end -- if has sidecar
@@ -1489,6 +1506,20 @@ Restart KOReader after editing the config file.]]), BD.dirpath(DataStorage:getSe
                     callback = function()
                         local myfields = self.settings_dialog:getFields()
                         self.server_url    = myfields[1]:gsub("/*$", "") -- remove all trailing slashes
+                        if not self.server_url:match("^https?://") then
+                            UIManager:show(MultiConfirmBox:new{
+                                text = _("The server URL should start with http:// or http://."),
+                                choice1_text = _("http://"),
+                                choice1_callback = function()
+                                    self.settings_dialog.input_fields[1]:setText("http://" .. self.server_url)
+                                end,
+                                choice2_text = _("https://"),
+                                choice2_callback = function()
+                                    self.settings_dialog.input_fields[1]:setText("https://" .. self.server_url)
+                                end,
+                            })
+                            return
+                        end
                         self.client_id     = myfields[2]
                         self.client_secret = myfields[3]
                         self.username      = myfields[4]

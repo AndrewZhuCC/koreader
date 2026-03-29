@@ -61,6 +61,7 @@ local linux_evdev_key_code_map = {
     [C.BTN_TOUCH] = "BTN_TOUCH",
     [C.BTN_STYLUS] = "BTN_STYLUS",
     [C.BTN_STYLUS2] = "BTN_STYLUS2",
+    [C.BTN_TOOL_DOUBLETAP] = "BTN_TOOL_DOUBLETAP",
 }
 
 local linux_evdev_abs_code_map = {
@@ -214,7 +215,7 @@ function Input:init()
     if self.input then -- luacheck: ignore 542
         -- Already setup (e.g. stubbed by the testsuite).
     elseif self.device:isSDL() then
-        self.input = require("ffi/input_SDL2_0")
+        self.input = require("ffi/input_SDL3")
         self.hasClipboardText = function()
             return self.input.hasClipboardText()
         end
@@ -704,6 +705,14 @@ function Input:handleKeyBoardEv(ev)
             return
         end
     end
+    -- On (some?) Kindles, cyttsp will report BTN_TOOL_DOUBLETAP on a two-slot contact... but with no data in the second slot :/.
+    -- c.f., https://github.com/koreader/koreader/pull/13714
+    if ev.code == C.BTN_TOOL_DOUBLETAP and ev.value == 1 and self.cur_slot ~= self.main_finger_slot and (self:getCurrentMtSlotData("x") == nil or self:getCurrentMtSlotData("y") == nil) then
+        -- Drop the empty slot to avoid breaking GestureDetector
+        self:setCurrentMtSlot("id", -1)
+
+        return
+    end
 
     local keycode = self.event_map[ev.code]
     if not keycode then
@@ -826,8 +835,16 @@ function Input:handlePowerManagementOnlyEv(ev)
     if G_reader_settings:isTrue("pageturn_power") then
         if keycode == "RPgBack" or keycode == "LPgBack"
         or keycode == "RPgFwd" or keycode == "LPgFwd" then
-            -- When suspended we pretend that the page turn button is a power button
-            return "PowerRelease"
+            -- When suspended, pretend that the page turn button is *almost* a power button...
+            if ev.value == KEY_PRESS or ev.value == KEY_REPEAT then
+                -- Swallow key press/release events to avoid sending unbalanced events for the actual key being pressed
+                return
+            elseif ev.value == KEY_RELEASE then
+                -- We only want to deal with key release events,
+                -- to avoid tripping the Kobo-specific "poweroff on hold" PowerPress handler...
+                -- (i.e., Power is a very very specific case where unbalanced press/release events *should* be fine).
+                return "PowerRelease"
+            end
         end
     end
 
@@ -922,7 +939,7 @@ function Input:handleTouchEv(ev)
         --       * PocketBook, because of our InkView EVT_POINTERMOVE translation
         --         (c.f., translateEvent @ ffi/input_pocketbook.lua).
         --       * SDL, because of our SDL_MOUSEMOTION/SDL_FINGERMOTION translation
-        --         (c.f., waitForEvent @ ffi/SDL2_0.lua).
+        --         (c.f., waitForEvent @ ffi/SDL3.lua).
         if ev.code == C.ABS_MT_SLOT then
             self:setupSlotData(ev.value)
         elseif ev.code == C.ABS_MT_TRACKING_ID then
@@ -1011,7 +1028,7 @@ function Input:handleTouchEvSnow(ev)
         --       * PocketBook, because of our InkView EVT_POINTERMOVE translation
         --         (c.f., translateEvent @ ffi/input_pocketbook.lua).
         --       * SDL, because of our SDL_MOUSEMOTION/SDL_FINGERMOTION translation
-        --         (c.f., waitForEvent @ ffi/SDL2_0.lua).
+        --         (c.f., waitForEvent @ ffi/SDL3.lua).
         if ev.code == C.ABS_MT_SLOT then
             self:setupSlotData(ev.value)
         elseif ev.code == C.ABS_MT_TRACKING_ID then

@@ -431,7 +431,11 @@ Further small adjustments can be done with 'Line Spacing' in the bottom menu.]])
                 id = "font_family_all_inherit",
                 title = _("Ignore publisher font families"),
                 description = _("Disable font-family specified in embedded styles."),
-                css = [[* { font-family: inherit !important; }]],
+                -- but we better keep the classic monospace ones be monospace
+                css = [[
+* { font-family: inherit !important; }
+listing, plaintext, xmp, samp, tt, kbd, pre, code { font-family: monospace !important; }
+                ]],
                 separator = true,
             },
             {
@@ -804,13 +808,29 @@ This is just an example, that will need to be adapted into a user style tweak.]]
             },
         },
         {
-            id = "no_pseudo_element_before_after",
-            title = _("Disable before/after pseudo elements"),
-            description = _([[Disable generated text from ::before and ::after pseudo elements, usually used to add cosmetic text around some content.]]),
-            css = [[
+            title = _("Pseudo-elements"),
+            {
+                id = "no_pseudo_element_before_after",
+                title = _("Disable before/after pseudo elements"),
+                description = _([[Disable generated text from ::before and ::after pseudo elements, usually used to add cosmetic text around some content.]]),
+                css = [[
 *::before { display: none !important; }
 *::after  { display: none !important; }
-            ]],
+                ]],
+            },
+            {
+                id = "no_pseudo_element_first_letter",
+                title = _("Disable first-letter pseudo elements"),
+                description = _([[Disable first letter styling from ::first-letter pseudo elements.]]),
+                css = [[*::first-letter { display: none !important; }]],
+            },
+            {
+                id = "no_pseudo_element_first_line",
+                title = _("Disable first-line pseudo elements"),
+                description = _([[Disable first line styling from ::first-line pseudo elements.]]),
+                css = [[*::first-line { display: none !important; }]],
+                separator = true,
+            },
             separator = true,
         },
         {

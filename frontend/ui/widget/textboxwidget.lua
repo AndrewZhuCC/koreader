@@ -1017,6 +1017,10 @@ function TextBoxWidget:_renderImage(start_row_idx)
     -- logger.dbg("display_bb:", display_bb, "display_alt", display_alt, "status_text:", status_text, "do_schedule_update:", do_schedule_update)
     -- Do what's been decided
     if display_bb then
+        -- If in nightmode, invert the image while we draw it
+        if Screen.night_mode then
+            image.bb:invert()
+        end
         -- With alpha-blending if the image contains an alpha channel
         local bbtype = image.bb:getType()
         if bbtype == Blitbuffer.TYPE_BB8A or bbtype == Blitbuffer.TYPE_BBRGB32 then
@@ -1032,6 +1036,9 @@ function TextBoxWidget:_renderImage(start_row_idx)
             else
                 self._bb:blitFrom(image.bb, self.width - image.width, 0)
             end
+        end
+        if Screen.night_mode then -- invert it back
+            image.bb:invert()
         end
 
         -- Request dithering
@@ -1223,6 +1230,20 @@ end
 function TextBoxWidget:getCharPos()
     -- returns virtual_line_num & current_line_num too
     return self.charpos, self.virtual_line_num, self.current_line_num
+end
+
+function TextBoxWidget:getCharPageTopLineNumber(charpos)
+    -- returns top line number of the page containing charpos
+    local ln = 1
+    while true do
+        local lend = ln + self.lines_per_page - 1
+        if lend >= #self.vertical_string_list -- last page
+            or self.vertical_string_list[lend + 1].offset > charpos
+        then
+            return ln
+        end
+        ln = ln + self.lines_per_page
+    end
 end
 
 function TextBoxWidget:getSize()
@@ -1887,21 +1908,10 @@ function TextBoxWidget:scrollViewToCharPos()
         end
         -- and adjust if cursor is out of view
         self:moveCursorToCharPos(self.charpos)
-        return
+    else
+        -- Otherwise, find the "hard" page containing charpos
+        self.virtual_line_num = self:getCharPageTopLineNumber(self.charpos)
     end
-    -- Otherwise, find the "hard" page containing charpos
-    local ln = 1
-    while true do
-        local lend = ln + self.lines_per_page - 1
-        if lend >= #self.vertical_string_list then
-            break -- last page
-        end
-        if self.vertical_string_list[lend+1].offset >= self.charpos then
-            break
-        end
-        ln = ln + self.lines_per_page
-    end
-    self.virtual_line_num = ln
 end
 
 function TextBoxWidget:moveCursorLeft()
@@ -2060,6 +2070,11 @@ function TextBoxWidget:onHoldReleaseText(callback, ges)
     if self.line_num_to_image and self.line_num_to_image[self.virtual_line_num] then
         local image = self.line_num_to_image[self.virtual_line_num]
         if self.hold_end_pos.x > self.width - image.width and self.hold_end_pos.y < image.height then
+            -- :onHoldStartText() and :onHoldPanText() do not check if on an image,
+            -- so we may have gotten some text selected: clear any.
+            if self:clearHighlight() then
+                self:redrawHighlight()
+            end
             -- Only if low-res image is loaded, so we have something to display
             -- if high-res loading is not implemented or if its loading fails
             if image.bb then
@@ -2381,7 +2396,7 @@ function TextBoxWidget:scheduleClearHighlightAndRedraw()
             self:redrawHighlight()
         end
     end
-    UIManager:scheduleIn(0.5, self.highlight_clear_and_redraw_action)
+    UIManager:scheduleIn(G_defaults:readSetting("DELAY_CLEAR_HIGHLIGHT_S"), self.highlight_clear_and_redraw_action)
 end
 
 function TextBoxWidget:unscheduleClearHighlightAndRedraw()

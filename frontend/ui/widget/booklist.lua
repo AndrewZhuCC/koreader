@@ -68,7 +68,6 @@ BookList.collates = {
     size = {
         text = _("size"),
         menu_order = 50,
-        can_collate_mixed = false,
         init_sort_func = function()
             return function(a, b)
                 return a.attr.size < b.attr.size
@@ -78,7 +77,6 @@ BookList.collates = {
     type = {
         text = _("type"),
         menu_order = 60,
-        can_collate_mixed = false,
         init_sort_func = function()
             return function(a, b)
                 if (a.suffix or b.suffix) and a.suffix ~= b.suffix then
@@ -94,7 +92,6 @@ BookList.collates = {
     percent_unopened_first = {
         text = _("percent - unopened first"),
         menu_order = 70,
-        can_collate_mixed = false,
         init_sort_func = function()
             return function(a, b)
                 if a.opened == b.opened then
@@ -119,7 +116,6 @@ BookList.collates = {
     percent_unopened_last = {
         text = _("percent - unopened last"),
         menu_order = 80,
-        can_collate_mixed = false,
         init_sort_func = function()
             return function(a, b)
                 if a.opened == b.opened then
@@ -145,7 +141,6 @@ BookList.collates = {
         -- sort 90% > 50% > 0% > on hold > unopened > 100% or finished
         text = _("percent – unopened – finished last"),
         menu_order = 90,
-        can_collate_mixed = false,
         init_sort_func = function(cache)
             local natsort
             natsort, cache = sort.natsort_cmp(cache)
@@ -272,7 +267,9 @@ function BookList.setBookInfoCache(file, doc_settings)
     if BookList.getBookStatusString(book_info.status) == nil then
         book_info.status = "reading"
     end
-    local pages = doc_settings:readSetting("doc_pages")
+    local pages = doc_settings:isTrue("pagemap_use_page_labels")
+        and doc_settings:readSetting("pagemap_doc_pages")
+         or doc_settings:readSetting("doc_pages")
     if pages == nil then
         local stats = doc_settings:readSetting("stats")
         if stats and stats.pages and stats.pages ~= 0 then -- crengine with statistics disabled stores 0

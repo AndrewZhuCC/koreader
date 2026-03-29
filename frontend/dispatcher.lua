@@ -37,11 +37,13 @@ local Notification = require("ui/widget/notification")
 local ReaderDictionary = require("apps/reader/modules/readerdictionary")
 local ReaderFooter = require("apps/reader/modules/readerfooter")
 local ReaderHighlight = require("apps/reader/modules/readerhighlight")
+local ReaderTypography = require("apps/reader/modules/readertypography")
 local ReaderZooming = require("apps/reader/modules/readerzooming")
 local Screen = Device.screen
 local UIManager = require("ui/uimanager")
 local util = require("util")
 local _ = require("gettext")
+local C_ = _.pgettext
 local NC_ = _.npgettext
 local T = require("ffi/util").template
 
@@ -52,14 +54,15 @@ local Dispatcher = {
 -- See above for description.
 local settingsList = {
     -- General
-    gesture_overview = {category="none", event="ShowGestureOverview", title=_("Gesture overview"), general=true},
+    gesture_overview = {category="none", event="ShowGestureOverview", title=_("Gesture overview"), general=true, condition=Device:isTouchDevice()},
     filemanager = {category="none", event="Home", title=_("File browser"), general=true},
     open_previous_document = {category="none", event="OpenLastDoc", title=_("Open previous document"), general=true},
     history = {category="none", event="ShowHist", title=_("History"), general=true},
     history_search = {category="none", event="SearchHistory", title=_("History search"), general=true},
     favorites = {category="none", event="ShowColl", title=_("Favorites"), general=true},
     collections = {category="none", event="ShowCollList", title=_("Collections"), general=true},
-    collections_search = {category="none", event="ShowCollectionsSearchDialog", title=_("Collections search"), general=true, separator=true},
+    collections_search = {category="none", event="ShowCollectionsSearchDialog", title=_("Collections search"), general=true},
+    bookmark_browser = {category="none", event="ShowBookmarkBrowser", title=_("Bookmark browser"), general=true, separator=true},
     ----
     dictionary_lookup = {category="none", event="ShowDictionaryLookup", title=_("Dictionary lookup"), general=true},
     load_dictionary_preset = {category="string", event="LoadDictionaryPreset", title=_("Load dictionary preset"), args_func=ReaderDictionary.getPresets, general=true},
@@ -84,6 +87,7 @@ local settingsList = {
     exit = {category="none", event="Exit", title=_("Exit KOReader"), device=true, separator=true},
     ----
     toggle_hold_corners = {category="none", event="IgnoreHoldCorners", title=_("Toggle long-press on corners"), device=true, condition=Device:isTouchDevice()},
+    ignore_hold_corners = {category="absolutenumber", event="IgnoreHoldCornersTime", default=10, min=5, max=30, unit=C_("Time", "s"), title=_("Ignore long-press on corners"), device=true, separator=true, condition=Device:isTouchDevice()},
     touch_input_on = {category="none", event="IgnoreTouchInput", arg=false, title=_("Enable touch input"), device=true, condition=Device:isTouchDevice()},
     touch_input_off = {category="none", event="IgnoreTouchInput", arg=true, title=_("Disable touch input"), device=true, condition=Device:isTouchDevice()},
     toggle_touch_input = {category="none", event="IgnoreTouchInput", title=_("Toggle touch input"), device=true, separator=true, condition=Device:isTouchDevice()},
@@ -117,7 +121,7 @@ local settingsList = {
     set_frontlight = {category="absolutenumber", event="SetFlIntensity", min=0, max=Device:getPowerDevice().fl_max, title=_("Set frontlight brightness"), screen=true, condition=Device:hasFrontlight()},
     increase_frontlight = {category="incrementalnumber", event="IncreaseFlIntensity", min=1, max=Device:getPowerDevice().fl_max, title=_("Increase frontlight brightness"), screen=true, condition=Device:hasFrontlight()},
     decrease_frontlight = {category="incrementalnumber", event="DecreaseFlIntensity", min=1, max=Device:getPowerDevice().fl_max, title=_("Decrease frontlight brightness"), screen=true, condition=Device:hasFrontlight()},
-    set_frontlight_warmth = {category="absolutenumber", event="SetFlWarmth", min=0, max=100, title=_("Set frontlight warmth"), screen=true, condition=Device:hasNaturalLight()},
+    set_frontlight_warmth = {category="absolutenumber", event="SetFlWarmth", min=1, max=Device:getPowerDevice().fl_max, title=_("Set frontlight warmth"), screen=true, condition=Device:hasNaturalLight()},
     increase_frontlight_warmth = {category="incrementalnumber", event="IncreaseFlWarmth", min=1, max=Device:getPowerDevice().fl_warmth_max, title=_("Increase frontlight warmth"), screen=true, condition=Device:hasNaturalLight()},
     decrease_frontlight_warmth = {category="incrementalnumber", event="DecreaseFlWarmth", min=1, max=Device:getPowerDevice().fl_warmth_max, title=_("Decrease frontlight warmth"), screen=true, condition=Device:hasNaturalLight(), separator=true},
     night_mode = {category="none", event="ToggleNightMode", title=_("Toggle night mode"), screen=true},
@@ -152,6 +156,7 @@ local settingsList = {
     fm_go_to = {category="none", event="ShowGotoDialog", title=_("Go to page"), filemanager=true},
     fm_back = {category="none", event="Back", title=_("Back"), filemanager=true, separator=true},
     ----
+    cloud_storage = {category="none", event="ShowCloudStorage", title=_("Cloud storage"), filemanager=true},
 
     -- Reader
     show_config_menu = {category="none", event="ShowConfigMenu", title=_("Show bottom menu"), reader=true},
@@ -167,6 +172,9 @@ local settingsList = {
     page_jmp = {category="absolutenumber", event="GotoViewRel", min=-100, max=100, title=_("Turn pages"), reader=true},
     go_to = {category="none", event="ShowGotoDialog", title=_("Go to page"), reader=true},
     skim = {category="none", event="ShowSkimtoDialog", title=_("Skim document"), reader=true},
+    pin_current_page = {category="none", event="PinPage", title=_("Pin current page"), reader=true},
+    go_to_pinned_page = {category="none", event="GoToPinnedPage", title=_("Go to pinned page"), reader=true, separator=true},
+    ----
     prev_bookmark = {category="none", event="GotoPreviousBookmarkFromPage", title=_("Previous bookmark"), reader=true},
     next_bookmark = {category="none", event="GotoNextBookmarkFromPage", title=_("Next bookmark"), reader=true},
     first_bookmark = {category="none", event="GotoFirstBookmark", title=_("First bookmark"), reader=true},
@@ -205,8 +213,8 @@ local settingsList = {
     set_inverse_reading_order = {category="string", event="ToggleReadingOrder", title=_("Invert page turn taps and swipes"), reader=true, condition=Device:isTouchDevice(), args={true, false}, toggle={_("on"), _("off")}},
     toggle_inverse_reading_order = {category="none", event="ToggleReadingOrder", title=_("Toggle page turn direction"), reader=true, condition=Device:isTouchDevice()},
     toggle_page_change_animation = {category="none", event="TogglePageChangeAnimation", title=_("Toggle page turn animations"), reader=true, condition=Device:canDoSwipeAnimation()},
-    toggle_handmade_toc = {category="none", event="ToggleHandmadeToc", title=_("Toggle custom TOC"), reader=true, condition=Device:isTouchDevice()},
-    toggle_handmade_flows = {category="none", event="ToggleHandmadeFlows", title=_("Toggle custom hidden flows"), reader=true, separator=true, condition=Device:isTouchDevice()},
+    toggle_handmade_toc = {category="none", event="ToggleHandmadeToc", title=_("Toggle custom TOC"), reader=true, condition=Device:isTouchDevice() or (Device:hasDPad() and Device:useDPadAsActionKeys())},
+    toggle_handmade_flows = {category="none", event="ToggleHandmadeFlows", title=_("Toggle custom hidden flows"), reader=true, separator=true, condition=Device:isTouchDevice() or (Device:hasDPad() and Device:useDPadAsActionKeys())},
     ----
     set_highlight_action = {category="string", event="SetHighlightAction", title=_("Set highlight action"), args_func=ReaderHighlight.getHighlightActions, reader=true},
     cycle_highlight_action = {category="none", event="CycleHighlightAction", title=_("Cycle highlight action"), reader=true},
@@ -217,9 +225,14 @@ local settingsList = {
     export_annotations = {category="none", event="ExportAnnotations", title=_("Export annotations"), reader=true},
 
     -- Reflowable documents
-    set_font = {category="string", event="SetFont", title=_("Font face"), rolling=true, args_func=require("fontlist").getFontArgFunc,},
+    set_typography_lang = {category="string", event="SetTypographyLanguage", title=_("Set typography language"), args_func=ReaderTypography.getLangTags, rolling=true, separator=true},
+    set_font = {category="string", event="SetFont", title=_("Font"), rolling=true, args_func=require("fontlist").getFontArgFunc,},
     increase_font = {category="incrementalnumber", event="IncreaseFontSize", min=0.5, max=255, step=0.5, title=_("Increase font size"), rolling=true},
     decrease_font = {category="incrementalnumber", event="DecreaseFontSize", min=0.5, max=255, step=0.5, title=_("Decrease font size"), rolling=true},
+    ----
+    toggle_style_tweaks = {category="none", event="ToggleStyleTweaks", title=_("Toggle style tweaks"), rolling=true},
+    edit_book_tweak = {category="none", event="EditBookTweak", title=_("Edit book-specific style tweak"), rolling=true},
+    toggle_book_tweak = {category="none", event="ToggleBookTweak", title=_("Toggle book-specific style tweak"), rolling=true},
 
     -- Fixed layout documents
     toggle_page_flipping = {category="none", event="TogglePageFlipping", title=_("Toggle page flipping"), paging=true},
@@ -279,13 +292,14 @@ local settingsList = {
     kopt_text_wrap = {category="string", paging=true},
     kopt_contrast = {category="string", paging=true},
     kopt_page_opt = {category="configurable", paging=true},
-    kopt_hw_dithering = {category="configurable", paging=true},
-    kopt_sw_dithering = {category="configurable", paging=true},
+    kopt_hw_dithering = {category="string", paging=true},
+    kopt_sw_dithering = {category="string", paging=true},
     kopt_quality = {category="configurable", paging=true},
     kopt_doc_language = {category="string", paging=true},
     kopt_forced_ocr = {category="configurable", paging=true},
     kopt_writing_direction = {category="configurable", paging=true},
     kopt_defect_size = {category="string", paging=true}, -- not shown in the bottom menu
+    kopt_nightmode_document = {category="configurable", paging=true},
     kopt_max_columns = {category="configurable", paging=true},
     kopt_auto_straighten = {category="absolutenumber", paging=true},
 
@@ -303,6 +317,7 @@ local dispatcher_menu_order = {
     "favorites",
     "collections",
     "collections_search",
+    "bookmark_browser",
     ----
     "dictionary_lookup",
     "load_dictionary_preset",
@@ -327,6 +342,8 @@ local dispatcher_menu_order = {
     "exit",
     ----
     "toggle_hold_corners",
+    "ignore_hold_corners",
+    ----
     "touch_input_on",
     "touch_input_off",
     "toggle_touch_input",
@@ -395,6 +412,7 @@ local dispatcher_menu_order = {
     "fm_go_to",
     "fm_back",
     ----
+    "cloud_storage",
 
     -- Reader
     "show_config_menu",
@@ -410,6 +428,9 @@ local dispatcher_menu_order = {
     "page_jmp",
     "go_to",
     "skim",
+    "pin_current_page",
+    "go_to_pinned_page",
+    ----
     "prev_bookmark",
     "next_bookmark",
     "first_bookmark",
@@ -460,6 +481,8 @@ local dispatcher_menu_order = {
     "export_annotations",
 
     -- Reflowable documents
+    "set_typography_lang",
+    ----
     "set_font",
     "increase_font",
     "decrease_font",
@@ -488,6 +511,11 @@ local dispatcher_menu_order = {
     "embedded_fonts",
     "smooth_scaling",
     "nightmode_images",
+    ----
+    "toggle_style_tweaks",
+    "edit_book_tweak",
+    "toggle_book_tweak",
+    -- Individual tweaks will be inserted here when "show in action list"
 
     -- Fixed layout documents
     "toggle_page_flipping",
@@ -524,6 +552,7 @@ local dispatcher_menu_order = {
     "kopt_forced_ocr",
     "kopt_writing_direction",
     "kopt_defect_size",
+    "kopt_nightmode_document",
     "kopt_max_columns",
     "kopt_auto_straighten",
 }
@@ -633,13 +662,24 @@ function Dispatcher:removeAction(name)
     return true
 end
 
-function Dispatcher.iter_func(settings)
+function Dispatcher.iter_func(settings, to_execute)
     local order = util.tableGetValue(settings, "settings", "order")
-    if order and #order > 1 then
+    if order then
+        local idx = settings.settings.execute_one_by_one
+        if idx and to_execute then
+            local ui = require("apps/reader/readerui").instance or require("apps/filemanager/filemanager").instance
+            if settings.settings.name then
+                ui.profiles.updated = true
+            else
+                ui.gestures.updated = true
+            end
+            idx = idx > #order and 1 or idx
+            settings.settings.execute_one_by_one = idx == #order and 1 or idx + 1
+            return ipairs({ order[idx] })
+        end
         return ipairs(order)
-    else
-        return pairs(settings)
     end
+    return pairs(settings)
 end
 
 -- Returns the number of items present in the settings table
@@ -739,6 +779,7 @@ function Dispatcher._removeFromOrder(location, settings, item)
         if k then
             table.remove(order, k)
             if Dispatcher:_itemsCount(actions) < 2 then
+                actions.settings.execute_one_by_one = nil
                 util.tableRemoveValue(actions, "settings", "order")
             end
         end
@@ -856,6 +897,7 @@ function Dispatcher:_addItem(caller, menu, location, settings, section)
                         end
                         local items = SpinWidget:new{
                             value = location[settings] ~= nil and location[settings][k] or settingsList[k].default or settingsList[k].min,
+                            default_value = settingsList[k].default,
                             value_min = settingsList[k].min,
                             value_step = settingsList[k].step,
                             precision = precision,
@@ -939,6 +981,7 @@ function Dispatcher:_addItem(caller, menu, location, settings, section)
                                     end
                                 end
                             end,
+                            radio = true,
                             callback = function()
                                 setValue(k, settingsList[k].args[i])
                             end,
@@ -999,6 +1042,7 @@ function Dispatcher:addSubMenu(caller, menu, location, settings)
             return location[settings] ~= nil and Dispatcher:_itemsCount(location[settings]) == 0
         end,
         check_callback_updates_menu = true,
+        radio = true,
         callback = function(touchmenu_instance)
             local function do_remove()
                 local actions = location[settings]
@@ -1065,24 +1109,64 @@ function Dispatcher:addSubMenu(caller, menu, location, settings)
         separator = true,
     })
     table.insert(menu, {
-        text = _("Show as QuickMenu"),
+        text = _("Execute"),
         checked_func = function()
-            return util.tableGetValue(location[settings], "settings", "show_as_quickmenu")
+            return not (util.tableGetValue(location[settings], "settings", "show_as_quickmenu") or
+                        util.tableGetValue(location[settings], "settings", "execute_one_by_one"))
         end,
+        radio = true,
         callback = function()
             local actions = location[settings]
             if actions then
                 if util.tableGetValue(actions, "settings", "show_as_quickmenu") then
+                    actions.settings.quickmenu_separators = nil
+                    actions.settings.keep_open_on_apply = nil
+                    actions.settings.anchor_quickmenu = nil
                     util.tableRemoveValue(actions, "settings", "show_as_quickmenu")
-                    util.tableRemoveValue(actions, "settings", "quickmenu_separators")
-                    util.tableRemoveValue(actions, "settings", "keep_open_on_apply")
-                    util.tableRemoveValue(actions, "settings", "anchor_quickmenu")
-                else
-                    util.tableSetValue(actions, true, "settings", "show_as_quickmenu")
+                    caller.updated = true
+                elseif util.tableGetValue(actions, "settings", "execute_one_by_one") then
+                    util.tableRemoveValue(actions, "settings", "execute_one_by_one")
+                    caller.updated = true
                 end
+            end
+        end,
+    })
+    table.insert(menu, {
+        text = _("Execute one by one"),
+        enabled_func = function()
+            return util.tableGetValue(location[settings], "settings", "order") and true or false
+        end,
+        checked_func = function()
+            return util.tableGetValue(location[settings], "settings", "execute_one_by_one")
+        end,
+        radio = true,
+        callback = function()
+            local actions = location[settings]
+            if actions and not util.tableGetValue(actions, "settings", "execute_one_by_one") then
+                util.tableSetValue(actions, 1, "settings", "execute_one_by_one") -- start from the first action
+                actions.settings.show_as_quickmenu = nil
+                actions.settings.quickmenu_separators = nil
+                actions.settings.keep_open_on_apply = nil
+                actions.settings.anchor_quickmenu = nil
                 caller.updated = true
             end
         end,
+    })
+    table.insert(menu, {
+        text = _("Show as QuickMenu"),
+        checked_func = function()
+            return util.tableGetValue(location[settings], "settings", "show_as_quickmenu")
+        end,
+        radio = true,
+        callback = function()
+            local actions = location[settings]
+            if actions and not util.tableGetValue(actions, "settings", "show_as_quickmenu") then
+                util.tableSetValue(actions, true, "settings", "show_as_quickmenu")
+                actions.settings.execute_one_by_one = nil
+                caller.updated = true
+            end
+        end,
+        separator = true,
     })
     table.insert(menu, {
         text = _("Keep QuickMenu open"),
@@ -1190,16 +1274,17 @@ function Dispatcher:execute(settings, exec_props)
             or (exec_props and exec_props.qm_show) then
         return Dispatcher._showAsMenu(settings, exec_props)
     end
-    local has_many = Dispatcher:_itemsCount(settings) > 1
+    local has_many = not (settings.settings and settings.settings.execute_one_by_one) and Dispatcher:_itemsCount(settings) > 1
     if has_many then
         UIManager:broadcastEvent(Event:new("BatchedUpdate"))
+        UIManager:setSilentMode(true)
     end
     Notification:setNotifySource(Notification.SOURCE_DISPATCHER)
     if settings.settings and settings.settings.notify then
         Notification:notify(T(_("Executing profile: %1"), settings.settings.name))
     end
     local gesture = exec_props and exec_props.gesture
-    for k, v in Dispatcher.iter_func(settings) do
+    for k, v in Dispatcher.iter_func(settings, true) do
         if type(k) == "number" then
             k = v
             v = settings[k]
@@ -1239,6 +1324,7 @@ function Dispatcher:execute(settings, exec_props)
     end
     Notification:resetNotifySource()
     if has_many then
+        UIManager:setSilentMode(false)
         UIManager:broadcastEvent(Event:new("BatchedUpdateDone"))
     end
 end
