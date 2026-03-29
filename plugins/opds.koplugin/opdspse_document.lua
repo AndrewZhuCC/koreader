@@ -340,6 +340,8 @@ function OPDSPSEDocument:init()
     self.size_cache = {}
     self.size_cache_count = 0
     self.cover_image_data = nil
+    self._next_chapter_count = nil
+    self._next_chapter_probed = false
 
     self:_readMetadata()
     logger.info("OPDSPSEDocument: Initialized with", self.count, "pages")
@@ -524,6 +526,16 @@ function OPDSPSEDocument:getOrDownloadPageData(pageno)
         self.page_data_cache[pageno] = data
         self.page_data_cache_count = self.page_data_cache_count + 1
         logger.dbg("OPDSPSEDocument: Successfully downloaded page", pageno)
+
+        -- When approaching the last page, prefetch next-chapter metadata
+        -- so the EndOfBook dialog can show the button without delay.
+        if self._next_chapter_count == nil
+                and self._next_chapter_probed ~= true
+                and pageno >= self.count - 2 then
+            self:probeNextChapter()
+            self._next_chapter_probed = true
+        end
+
         return data
     else
         logger.dbg("OPDSPSEDocument: Request failed:", status or code)
@@ -629,7 +641,8 @@ function OPDSPSEDocument:buildMetadataUrl(chapter_url)
 end
 
 --- Fetch chapter metadata from the OPDS server.
---- Returns (count, true) on success, (nil, false) on failure.
+--- The metadata endpoint returns an Atom/XML feed with pse:count in the
+--- stream link.  Returns (count, true) on success, (nil, false) on failure.
 function OPDSPSEDocument:fetchChapterMetadata(chapter_url)
     local meta_url = self:buildMetadataUrl(chapter_url)
     if not meta_url then return nil, false end
@@ -656,21 +669,14 @@ function OPDSPSEDocument:fetchChapterMetadata(chapter_url)
         return nil, false
     end
 
-    local json = require("dkjson")
-    local ok, meta = pcall(json.decode, table.concat(resp_data))
-    if not ok or not meta then
-        logger.dbg("OPDSPSEDocument: Failed to parse metadata JSON")
-        return nil, false
-    end
-
-    -- Komga OPDS metadata: "numberOfPages" or "pagesCount" or "count"
-    local count = tonumber(meta.numberOfPages)
-                  or tonumber(meta.pagesCount)
-                  or tonumber(meta.count)
+    local body = table.concat(resp_data)
+    -- The response is Atom XML; extract pse:count="N" from the PSE stream link
+    local count = tonumber(body:match('pse:count="(%d+)"'))
+                  or tonumber(body:match(':count="(%d+)"'))
     if count and count > 0 then
         return count, true
     end
-    logger.dbg("OPDSPSEDocument: No page count found in metadata:", meta)
+    logger.dbg("OPDSPSEDocument: No pse:count found in metadata response")
     return nil, false
 end
 
@@ -680,13 +686,38 @@ function OPDSPSEDocument:probeNextChapter()
     local next_url = self:getNextChapterUrl()
     if not next_url then return nil end
 
+    -- Try metadata API first (gives us the real page count)
     local count, ok = self:fetchChapterMetadata(next_url)
     if ok and count then
         logger.dbg("OPDSPSEDocument: Next chapter exists, pages:", count)
         self._next_chapter_count = count
         return count
     end
-    logger.dbg("OPDSPSEDocument: Next chapter does not exist or metadata unavailable")
+
+    -- Fallback: probe by requesting the first page with minimal data
+    local test_url = next_url:gsub("{pageNumber}", "0")
+    test_url = test_url:gsub("{maxWidth}", "1")
+    logger.dbg("OPDSPSEDocument: Metadata failed, probing first page:", test_url)
+    local parsed = url.parse(test_url)
+    if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
+        return nil
+    end
+    socketutil:set_timeout(5, 10)
+    local code = socket.skip(1, http.request {
+        url     = test_url,
+        headers = { ["Accept-Encoding"] = "identity" },
+        sink    = ltn12.sink.null(),
+        user    = self.username,
+        password = self.password,
+    })
+    socketutil:reset_timeout()
+    if code == 200 then
+        logger.dbg("OPDSPSEDocument: Next chapter exists (via page probe), using current count as fallback")
+        self._next_chapter_count = self.count
+        return self.count
+    end
+
+    logger.dbg("OPDSPSEDocument: Next chapter does not exist, probe returned", code)
     self._next_chapter_count = nil
     return nil
 end

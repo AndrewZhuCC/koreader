@@ -119,7 +119,9 @@ function ReaderStatus:onEndOfBook()
         -- For OPDS PSE streaming documents, add a "Next chapter" button
         if self.document.file and self.document.file:match("%.opdspse$")
                 and self.document.getNextChapterUrl then
-            local next_count = self.document:probeNextChapter()
+            -- Use prefetched result if available, otherwise probe now
+            local next_count = self.document._next_chapter_count
+                               or self.document:probeNextChapter()
             local doc = self.document
             table.insert(buttons, 1, {
                 {
