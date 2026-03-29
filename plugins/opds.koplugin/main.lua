@@ -89,11 +89,11 @@ function OPDS:addToMainMenu(menu_items)
 end
 
 function OPDS:closeReaderUi()
-  -- Let all event handlers run before closing the ReaderUI, because
-  -- some stuff might break if we just remove it ASAP
-  UIManager:nextTick(function()
-    ReaderUI.instance:onClose()
-  end)
+    UIManager:nextTick(function()
+        if ReaderUI.instance then
+            ReaderUI.instance:onClose()
+        end
+    end)
 end
 
 function OPDS:onShowOPDSCatalog()

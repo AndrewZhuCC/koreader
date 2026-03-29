@@ -3,7 +3,6 @@ local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local logger = require("logger")
 local ltn12 = require("ltn12")
-local RenderImage = require("ui/renderimage")
 local Screen = require("device").screen
 local socket = require("socket")
 local socketutil = require("socketutil")
@@ -15,17 +14,14 @@ local T = require("ffi/util").template
 
 local OPDSPSE = {}
 
--- This function attempts to pull chapter progress from Kavita.
 function OPDSPSE:getLastPage(remote_url, username, password)
     local last_page = 0
 
-    -- create URL's and reference vars
     local chapter = string.match(remote_url, "chapterId=(%w+)")
     local api_key = string.match(remote_url, "opds/(.+)/image")
     local progress_url = string.match(remote_url, "(.+)/api").."/api/Reader/get-progress?chapterId="..chapter
     local auth_url = string.match(remote_url, "(.+)/api").."/api/Plugin/authenticate?apiKey="..api_key.."&pluginName=KOReader-OPDS"
 
-    -- Do an HTTP POST to get the Bearer Token for authentication of the /api/Reader/get-progress endpoint
     local auth_parsed = url.parse(auth_url)
     local auth_data = {}
     local auth_code, auth_headers, auth_status
@@ -50,11 +46,21 @@ function OPDSPSE:getLastPage(remote_url, username, password)
     end
 
     if auth_code == 200 then
-        -- if http request for bearer token was successful, pull bearer token from response and
-        -- attempt to pull progress for chapterId in remote_url
-        local bearer_token = auth_data[1]:match("\"token\":\"(.+)\",\"refresh")
+        local ok, json = pcall(require, "dkjson")
+        local bearer_token
+        if ok then
+            local parsed = json.decode(table.concat(auth_data))
+            if parsed then bearer_token = parsed.token end
+        end
+        if not bearer_token then
+            bearer_token = auth_data[1] and auth_data[1]:match('"token"%s*:%s*"([^"]+)"')
+        end
 
-        -- Do HTTP GET request for chapter progress
+        if not bearer_token then
+            logger.dbg("OPDSPSE:getLastPage: Failed to extract bearer token")
+            return last_page
+        end
+
         local progress_parsed = url.parse(progress_url)
         local progress_data = {}
         local progress_code, progress_headers, progress_status
@@ -78,8 +84,13 @@ function OPDSPSE:getLastPage(remote_url, username, password)
         end
 
         if progress_code == 200 then
-            -- if HTTP GET was successful, pull page number from response
-            last_page = progress_data[1]:match("\"pageNum\":(.+),\"seriesId")
+            if ok then
+                local parsed = json.decode(table.concat(progress_data))
+                if parsed then last_page = parsed.pageNum or 0 end
+            else
+                local num = progress_data[1] and progress_data[1]:match('"pageNum"%s*:%s*(%d+)')
+                if num then last_page = tonumber(num) or 0 end
+            end
         else
             logger.dbg("OPDSPSE:getLastPage: Progress Request failed:", progress_status or progress_code)
             logger.dbg("OPDSPSE:getLastPage: Progress Response headers:", progress_headers)
@@ -89,13 +100,14 @@ function OPDSPSE:getLastPage(remote_url, username, password)
         logger.dbg("OPDSPSE:getLastPage: Authentication Response headers:", auth_headers)
     end
 
-    -- returns page number. If the HTTP Requests were unsuccessful, defaults to 0.
-    return last_page;
+    return last_page
 end
 
 function OPDSPSE:streamPages(remote_url, count, continue, username, password, last_page_read)
-    -- New approach: Create a streaming document instead of using ImageViewer
     local suc = self:createStreamingDocument(remote_url, count, username, password, "Streaming Comic")
+    if not suc then
+        return false
+    end
 
     UIManager:nextTick(function()
         local reader = UIManager:getTopmostVisibleWidget()
@@ -107,88 +119,10 @@ function OPDSPSE:streamPages(remote_url, count, continue, username, password, la
             reader:handleEvent(Event:new("GotoPage", last_page_read))
         end
     end)
-    
 
-    return suc
+    return true
 end
 
-function OPDSPSE:streamPagesOld(remote_url, count, continue, username, password, last_page_read)
-    -- attempt to pull chapter progress from Kavita if user pressed
-    -- "Page Stream" button.
-    -- We have to pull the progress here, otherwise the creation of the page_table
-    -- will overwrite the book progress before we pull it, making it always 0.
-    local ok, last_page = pcall(function() return self:getLastPage(remote_url, username, password) end)
-    if not ok then
-        logger.warn("Couldn't pull progress, defaulting to Page 0.")
-        last_page = 0
-    end
-    local page_table = {image_disposable = true}
-    setmetatable(page_table, {__index = function (_, key)
-        if type(key) ~= "number" then
-            local error_bb = RenderImage:renderImageFile("resources/koreader.png", false)
-            return error_bb
-        else
-            local index = key - 1
-            local page_url = remote_url:gsub("{pageNumber}", tostring(index))
-            page_url = page_url:gsub("{maxWidth}", tostring(Screen:getWidth()))
-            local page_data = {}
-
-            logger.dbg("Streaming page from", page_url)
-            local parsed = url.parse(page_url)
-
-            local code, headers, status
-            if parsed.scheme == "http" or parsed.scheme == "https" then
-                socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
-                code, headers, status = socket.skip(1, http.request {
-                    url         = page_url,
-                    headers     = {
-                        ["Accept-Encoding"] = "identity",
-                    },
-                    sink        = ltn12.sink.table(page_data),
-                    user        = username,
-                    password    = password,
-                })
-                socketutil:reset_timeout()
-            else
-                UIManager:show(InfoMessage:new {
-                    text = T(_("Invalid protocol:\n%1"), parsed.scheme),
-                })
-            end
-
-            local data = table.concat(page_data)
-            if code == 200 then
-                local page_bb = RenderImage:renderImageData(data, #data, false)
-                             or RenderImage:renderImageFile("resources/koreader.png", false)
-                return page_bb
-            else
-                logger.dbg("OPDSBrowser:streamPages: Request failed:", status or code)
-                logger.dbg("OPDSBrowser:streamPages: Response headers:", headers)
-                local error_bb = RenderImage:renderImageFile("resources/koreader.png", false)
-                return error_bb
-            end
-        end
-    end})
-    local ImageViewer = require("ui/widget/imageviewer")
-    local viewer = ImageViewer:new{
-        image = page_table,
-        fullscreen = true,
-        with_title_bar = false,
-        image_disposable = false, -- instead set page_table image_disposable to true
-        images_list_nb = count,
-    }
-    UIManager:show(viewer)
-    if continue then
-        self:jumpToPage(viewer, count)
-    elseif last_page_read then
-        viewer:switchToImageNum(last_page_read)
-    else
-        -- add 1 since Kavita's Page count is zero based
-        -- and ImageViewer is not.
-        viewer:switchToImageNum(last_page+1)
-    end
-end
-
--- Shows a page number dialog for page streaming.
 function OPDSPSE:jumpToPageReader(reader, count)
     local input_dialog
     input_dialog = InputDialog:new{
@@ -222,64 +156,25 @@ function OPDSPSE:jumpToPageReader(reader, count)
     input_dialog:onShowKeyboard()
 end
 
--- Shows a page number dialog for page streaming.
-function OPDSPSE:jumpToPage(viewer, count)
-    local input_dialog
-    input_dialog = InputDialog:new{
-        title = _("Enter page number"),
-        input_type = "number",
-        input_hint = "(" .. "1 - " .. count .. ")",
-        buttons = {
-            {
-                {
-                    text = _("Cancel"),
-                    id = "close",
-                    callback = function()
-                        UIManager:close(input_dialog)
-                    end,
-                },
-                {
-                    text = _("Stream"),
-                    is_enter_default = true,
-                    callback = function()
-                        local page_num = input_dialog:getInputValue()
-                        if page_num then
-                            UIManager:close(input_dialog)
-                            viewer:switchToImageNum(math.min(math.max(1, page_num), count))
-                        end
-                    end,
-                },
-            }
-        },
-    }
-    UIManager:show(input_dialog)
-    input_dialog:onShowKeyboard()
-end
-
--- Creates a .opdspse file and opens it as a document
 function OPDSPSE:createStreamingDocument(remote_url, count, username, password, title)
     local temp_dir = "/tmp/koreader_streaming"
     local lfs = require("libs/libkoreader-lfs")
-    
-    -- Create temp directory if it doesn't exist
+
     if not lfs.attributes(temp_dir) then
         lfs.mkdir(temp_dir)
     end
-    
-    -- Create .opdspse file
-    local filename = (title or "streaming"):gsub("[^%w%-_.]", "_") -- sanitize filename
+
+    local filename = (title or "streaming"):gsub("[^%w%-_.]", "_")
     local opdspse_path = temp_dir .. "/" .. filename .. "_" .. os.time() .. ".opdspse"
-    
+
     local file = io.open(opdspse_path, "w")
     if not file then
-        local InfoMessage = require("ui/widget/infomessage")
         UIManager:show(InfoMessage:new{
             text = _("Failed to create streaming document file"),
         })
         return false
     end
-    
-    -- Write configuration in simple key=value format
+
     file:write("remote_url=" .. remote_url .. "\n")
     file:write("count=" .. tostring(count) .. "\n")
     if username then
@@ -292,11 +187,10 @@ function OPDSPSE:createStreamingDocument(remote_url, count, username, password, 
         file:write("title=" .. title .. "\n")
     end
     file:close()
-    
-    -- Open the document using ReaderUI
+
     local ReaderUI = require("apps/reader/readerui")
     ReaderUI:showReader(opdspse_path)
-    
+
     return true
 end
 
