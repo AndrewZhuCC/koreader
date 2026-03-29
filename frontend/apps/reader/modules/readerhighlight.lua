@@ -2698,7 +2698,11 @@ function ReaderHighlight:onReadSettings(config)
         if config:has("panel_zoom_enabled") then
             self.panel_zoom_enabled = config:isTrue("panel_zoom_enabled")
         else
-            self.panel_zoom_enabled = G_reader_settings:getSettingForExt("panel_zoom_enabled", ext) or false
+            local default = G_reader_settings:getSettingForExt("panel_zoom_enabled", ext)
+            if default == nil and ext == "opdspse" then
+                default = true
+            end
+            self.panel_zoom_enabled = default or false
         end
         if config:has("panel_zoom_fallback_to_text_selection") then
             self.panel_zoom_fallback_to_text_selection = config:isTrue("panel_zoom_fallback_to_text_selection")

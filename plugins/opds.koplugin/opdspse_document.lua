@@ -40,19 +40,35 @@ end
 OPDSPSEPage.new = OPDSPSEPage.extend
 
 function OPDSPSEPage:draw(dc, bb)
-    if self.image_bb then
-        local scaled_bb = self.image_bb:scale(bb:getWidth(), bb:getHeight())
-
-        local gamma = dc:getGamma()
-        if gamma >= 0.0 and gamma ~= 1.0 then
-            self:applyGamma(scaled_bb, gamma)
-        end
-
-        bb:blitFullFrom(scaled_bb, 0, 0)
-        scaled_bb:free()
-    else
+    if not self.image_bb then
         logger.err("OPDSPSEPage: No image to draw")
+        return
     end
+
+    local target_w = bb:getWidth()
+    local target_h = bb:getHeight()
+    local src_w = self.image_bb:getWidth()
+    local src_h = self.image_bb:getHeight()
+
+    local scaled_bb
+    if self.image_data and (target_w ~= src_w or target_h ~= src_h) then
+        -- Re-render from raw image bytes at the exact target size using
+        -- MuPDF / TurboJpeg (high-quality resampling), instead of the
+        -- nearest-neighbour BlitBuffer:scale().
+        scaled_bb = RenderImage:renderImageData(
+            self.image_data, #self.image_data, false, target_w, target_h)
+    end
+    if not scaled_bb then
+        scaled_bb = self.image_bb:scale(target_w, target_h)
+    end
+
+    local gamma = dc:getGamma()
+    if gamma >= 0.0 and gamma ~= 1.0 then
+        self:applyGamma(scaled_bb, gamma)
+    end
+
+    bb:blitFullFrom(scaled_bb, 0, 0)
+    scaled_bb:free()
 end
 
 function OPDSPSEPage:applyGamma(bb, gamma)
@@ -116,6 +132,7 @@ function OPDSPSEPage:close()
         self.image_bb:free()
         self.image_bb = nil
     end
+    self.image_data = nil
 end
 
 function OPDSPSEPage:getPagePix(kopt_context)
@@ -392,19 +409,29 @@ function OPDSPSEDocument:getCoverPageImage()
 end
 
 function OPDSPSEDocument:openPage(pageno)
-    local page_bb = self:getPageImage(pageno)
+    local image_data = self:getOrDownloadPageData(pageno)
+
+    if pageno == 1 then
+        self.cover_image_data = image_data
+    elseif self.cover_image_data == nil then
+        self.cover_image_data = self:getOrDownloadPageData(1)
+    end
+
+    local page_bb
+    if image_data then
+        page_bb = RenderImage:renderImageData(image_data, #image_data, false)
+    end
     if not page_bb then
         logger.err("OPDSPSEDocument: Failed to get page image for page", pageno)
         page_bb = RenderImage:renderImageFile("resources/koreader.png", false)
+        image_data = nil
     end
-
-    local width = page_bb and page_bb:getWidth() or 0
-    local height = page_bb and page_bb:getHeight() or 0
 
     return OPDSPSEPage:new{
         image_bb = page_bb,
-        width = width,
-        height = height,
+        image_data = image_data,
+        width = page_bb and page_bb:getWidth() or 0,
+        height = page_bb and page_bb:getHeight() or 0,
         doc = self,
     }
 end
@@ -482,8 +509,27 @@ function OPDSPSEDocument:getOrDownloadPageData(pageno)
         return data
     else
         logger.dbg("OPDSPSEDocument: Request failed:", status or code)
-        logger.dbg("OPDSPSEDocument: Response headers:", headers)
+        -- Server returned non-200: this page doesn't exist.
+        -- Shrink page count so KOReader knows the real end of document.
+        if pageno > 1 and pageno <= self.count then
+            self:adjustPageCount(pageno - 1)
+        end
         return nil
+    end
+end
+
+function OPDSPSEDocument:adjustPageCount(real_count)
+    logger.info("OPDSPSEDocument: Adjusting page count from", self.count, "to", real_count)
+    self.count = real_count
+    self.info.number_of_pages = real_count
+    -- Sync ReaderPaging's cached number_of_pages so progress bar and
+    -- EndOfBook detection use the correct value.
+    local ReaderUI = require("apps/reader/readerui")
+    if ReaderUI.instance then
+        local paging = ReaderUI.instance.paging
+        if paging then
+            paging.number_of_pages = real_count
+        end
     end
 end
 
@@ -495,6 +541,12 @@ function OPDSPSEDocument:downloadPage(pageno)
         self.cover_image_data = self:getOrDownloadPageData(1)
     end
     if not data then
+        -- If count was just shrunk past this page, the page simply doesn't
+        -- exist.  Return nil so the caller can handle it (e.g. trigger
+        -- EndOfBook) instead of showing a placeholder image.
+        if pageno > self.count then
+            return nil
+        end
         return RenderImage:renderImageFile("resources/koreader.png", false)
     end
     local page_bb = RenderImage:renderImageData(data, #data, false)
@@ -521,58 +573,104 @@ function OPDSPSEDocument:close()
     end
 end
 
---- Compute the remote_url for the next chapter by incrementing the chapter ID
---- in the URL path. Returns (next_url, next_chapter_id) or (nil, nil).
-function OPDSPSEDocument:getNextChapterUrl()
-    if not self.remote_url then return nil, nil end
-    -- Match patterns like /chapter/28/ or /chapter/28?
-    local prefix, chapter_str, suffix = self.remote_url:match("^(.*/chapter/)(%d+)(/.*)$")
+--- Extract (prefix, chapter_id_str, page_suffix) from remote_url.
+--- prefix ends with "/chapter/", page_suffix starts from "/page/...".
+--- Returns nil when the URL doesn't match any known pattern.
+function OPDSPSEDocument:parseChapterUrl(a_url)
+    a_url = a_url or self.remote_url
+    if not a_url then return nil end
+    -- /series/1559/chapter/28/page/{pageNumber}?...
+    local prefix, id_str, suffix = a_url:match("^(.*/chapter/)(%d+)(/.*)$")
     if not prefix then
-        -- Try query-param style: chapterId=28
-        prefix, chapter_str, suffix = self.remote_url:match("^(.*chapterId=)(%d+)(.*)$")
+        -- chapterId=28
+        prefix, id_str, suffix = a_url:match("^(.*chapterId=)(%d+)(.*)$")
     end
-    if not prefix or not chapter_str then
+    if prefix and id_str then
+        return prefix, id_str, suffix
+    end
+    return nil
+end
+
+--- Build the remote_url for the next chapter (chapter ID + 1).
+function OPDSPSEDocument:getNextChapterUrl()
+    local prefix, id_str, suffix = self:parseChapterUrl()
+    if not prefix then
         logger.dbg("OPDSPSEDocument: Cannot extract chapter ID from URL:", self.remote_url)
         return nil, nil
     end
-    local next_id = tonumber(chapter_str) + 1
+    local next_id = tonumber(id_str) + 1
     return prefix .. tostring(next_id) .. suffix, next_id
 end
 
---- Probe whether the next chapter exists by requesting its first page.
---- Some servers (Komga/Kavita) don't support HEAD for image endpoints,
---- so we do a small GET and discard the body.
-function OPDSPSEDocument:probeNextChapter()
-    local next_url = self:getNextChapterUrl()
-    if not next_url then return nil end
+--- Build a metadata URL for the given chapter URL by replacing
+--- /page/{pageNumber}... with /metadata.
+--- e.g. .../chapter/29/page/{pageNumber}?foo -> .../chapter/29/metadata
+function OPDSPSEDocument:buildMetadataUrl(chapter_url)
+    local base = chapter_url:match("^(.*/chapter/%d+/)")
+    return base and (base .. "metadata")
+end
 
-    local test_url = next_url:gsub("{pageNumber}", "0")
-    test_url = test_url:gsub("{maxWidth}", "1")
+--- Fetch chapter metadata from the OPDS server.
+--- Returns (count, true) on success, (nil, false) on failure.
+function OPDSPSEDocument:fetchChapterMetadata(chapter_url)
+    local meta_url = self:buildMetadataUrl(chapter_url)
+    if not meta_url then return nil, false end
 
-    logger.dbg("OPDSPSEDocument: Probing next chapter:", test_url)
-    local parsed = url.parse(test_url)
+    logger.dbg("OPDSPSEDocument: Fetching chapter metadata:", meta_url)
+    local parsed = url.parse(meta_url)
     if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
-        return nil
+        return nil, false
     end
 
-    -- Use short timeouts (block=5s, total=10s) for the probe
+    local resp_data = {}
     socketutil:set_timeout(5, 10)
     local code = socket.skip(1, http.request {
-        url     = test_url,
-        headers = { ["Accept-Encoding"] = "identity" },
-        sink    = ltn12.sink.null(),
-        user    = self.username,
+        url      = meta_url,
+        headers  = { ["Accept-Encoding"] = "identity" },
+        sink     = ltn12.sink.table(resp_data),
+        user     = self.username,
         password = self.password,
     })
     socketutil:reset_timeout()
 
-    if code == 200 then
-        logger.dbg("OPDSPSEDocument: Next chapter exists")
-        return true
-    else
-        logger.dbg("OPDSPSEDocument: Next chapter probe returned", code)
-        return nil
+    if code ~= 200 then
+        logger.dbg("OPDSPSEDocument: Metadata request returned", code)
+        return nil, false
     end
+
+    local json = require("dkjson")
+    local ok, meta = pcall(json.decode, table.concat(resp_data))
+    if not ok or not meta then
+        logger.dbg("OPDSPSEDocument: Failed to parse metadata JSON")
+        return nil, false
+    end
+
+    -- Komga OPDS metadata: "numberOfPages" or "pagesCount" or "count"
+    local count = tonumber(meta.numberOfPages)
+                  or tonumber(meta.pagesCount)
+                  or tonumber(meta.count)
+    if count and count > 0 then
+        return count, true
+    end
+    logger.dbg("OPDSPSEDocument: No page count found in metadata:", meta)
+    return nil, false
+end
+
+--- Probe the next chapter via its metadata endpoint.
+--- Returns (count_of_next_chapter) on success, nil if it doesn't exist.
+function OPDSPSEDocument:probeNextChapter()
+    local next_url = self:getNextChapterUrl()
+    if not next_url then return nil end
+
+    local count, ok = self:fetchChapterMetadata(next_url)
+    if ok and count then
+        logger.dbg("OPDSPSEDocument: Next chapter exists, pages:", count)
+        self._next_chapter_count = count
+        return count
+    end
+    logger.dbg("OPDSPSEDocument: Next chapter does not exist or metadata unavailable")
+    self._next_chapter_count = nil
+    return nil
 end
 
 --- Open the next chapter as a new streaming document.
@@ -580,10 +678,9 @@ function OPDSPSEDocument:openNextChapter()
     local next_url = self:getNextChapterUrl()
     if not next_url then return false end
 
+    local count = self._next_chapter_count or self.count
     local OPDSPSE = require("opdspse")
-    -- Use the same count as current chapter as a reasonable default;
-    -- the actual page count will be bounded by server responses.
-    return OPDSPSE:streamPages(next_url, self.count, false, self.username, self.password)
+    return OPDSPSE:streamPages(next_url, count, false, self.username, self.password)
 end
 
 -- KoptInterface delegate methods
