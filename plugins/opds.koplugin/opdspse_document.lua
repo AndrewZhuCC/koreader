@@ -521,6 +521,71 @@ function OPDSPSEDocument:close()
     end
 end
 
+--- Compute the remote_url for the next chapter by incrementing the chapter ID
+--- in the URL path. Returns (next_url, next_chapter_id) or (nil, nil).
+function OPDSPSEDocument:getNextChapterUrl()
+    if not self.remote_url then return nil, nil end
+    -- Match patterns like /chapter/28/ or /chapter/28?
+    local prefix, chapter_str, suffix = self.remote_url:match("^(.*/chapter/)(%d+)(/.*)$")
+    if not prefix then
+        -- Try query-param style: chapterId=28
+        prefix, chapter_str, suffix = self.remote_url:match("^(.*chapterId=)(%d+)(.*)$")
+    end
+    if not prefix or not chapter_str then
+        logger.dbg("OPDSPSEDocument: Cannot extract chapter ID from URL:", self.remote_url)
+        return nil, nil
+    end
+    local next_id = tonumber(chapter_str) + 1
+    return prefix .. tostring(next_id) .. suffix, next_id
+end
+
+--- Probe whether the next chapter exists by requesting its first page.
+--- Some servers (Komga/Kavita) don't support HEAD for image endpoints,
+--- so we do a small GET and discard the body.
+function OPDSPSEDocument:probeNextChapter()
+    local next_url = self:getNextChapterUrl()
+    if not next_url then return nil end
+
+    local test_url = next_url:gsub("{pageNumber}", "0")
+    test_url = test_url:gsub("{maxWidth}", "1")
+
+    logger.dbg("OPDSPSEDocument: Probing next chapter:", test_url)
+    local parsed = url.parse(test_url)
+    if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
+        return nil
+    end
+
+    -- Use short timeouts (block=5s, total=10s) for the probe
+    socketutil:set_timeout(5, 10)
+    local code = socket.skip(1, http.request {
+        url     = test_url,
+        headers = { ["Accept-Encoding"] = "identity" },
+        sink    = ltn12.sink.null(),
+        user    = self.username,
+        password = self.password,
+    })
+    socketutil:reset_timeout()
+
+    if code == 200 then
+        logger.dbg("OPDSPSEDocument: Next chapter exists")
+        return true
+    else
+        logger.dbg("OPDSPSEDocument: Next chapter probe returned", code)
+        return nil
+    end
+end
+
+--- Open the next chapter as a new streaming document.
+function OPDSPSEDocument:openNextChapter()
+    local next_url = self:getNextChapterUrl()
+    if not next_url then return false end
+
+    local OPDSPSE = require("opdspse")
+    -- Use the same count as current chapter as a reasonable default;
+    -- the actual page count will be bounded by server responses.
+    return OPDSPSE:streamPages(next_url, self.count, false, self.username, self.password)
+end
+
 -- KoptInterface delegate methods
 
 function OPDSPSEDocument:getPageTextBoxes()

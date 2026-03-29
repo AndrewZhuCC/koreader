@@ -116,6 +116,32 @@ function ReaderStatus:onEndOfBook()
                 },
             },
         }
+        -- For OPDS PSE streaming documents, add a "Next chapter" button
+        if self.document.file and self.document.file:match("%.opdspse$")
+                and self.document.getNextChapterUrl then
+            local has_next = self.document:probeNextChapter()
+            -- Capture what we need before the document gets closed
+            local doc = self.document
+            table.insert(buttons, 1, {
+                {
+                    text = _("Next chapter"),
+                    enabled = has_next and true or false,
+                    callback = function()
+                        UIManager:close(button_dialog)
+                        -- Grab next chapter info before closing
+                        local next_url = doc:getNextChapterUrl()
+                        local count = doc.count
+                        local username = doc.username
+                        local password = doc.password
+                        UIManager:nextTick(function()
+                            self.ui:onClose()
+                            local OPDSPSE = require("opdspse")
+                            OPDSPSE:streamPages(next_url, count, false, username, password)
+                        end)
+                    end,
+                },
+            })
+        end
         button_dialog = ButtonDialog:new{
             name = "end_document",
             title = _("You've reached the end of the document.\nWhat would you like to do?"),
