@@ -116,31 +116,37 @@ function ReaderStatus:onEndOfBook()
                 },
             },
         }
-        -- For OPDS PSE streaming documents, add a "Next chapter" button
+        -- For OPDS PSE streaming documents, add a "Next chapter" button,
+        -- but ONLY when the user has actually reached the real last page.
+        -- If a mid-chapter page failed to load (timeout / network error),
+        -- we must not offer "Next chapter" — the user is not at the end.
         if self.document.file and self.document.file:match("%.opdspse$")
                 and self.document.getNextChapterUrl then
-            -- Use prefetched result if available, otherwise probe now
-            local next_count = self.document._next_chapter_count
-                               or self.document:probeNextChapter()
-            local doc = self.document
-            table.insert(buttons, 1, {
-                {
-                    text = _("Next chapter"),
-                    enabled = next_count and true or false,
-                    callback = function()
-                        UIManager:close(button_dialog)
-                        local next_url = doc:getNextChapterUrl()
-                        local count = doc._next_chapter_count
-                        local username = doc.username
-                        local password = doc.password
-                        UIManager:nextTick(function()
-                            self.ui:onClose()
-                            local OPDSPSE = require("opdspse")
-                            OPDSPSE:streamPages(next_url, count, false, username, password)
-                        end)
-                    end,
-                },
-            })
+            local cur_page = self.ui.paging and self.ui.paging.current_page or 0
+            local real_count = self.document.count
+            if cur_page >= real_count then
+                local next_count = self.document._next_chapter_count
+                                   or self.document:probeNextChapter()
+                local doc = self.document
+                table.insert(buttons, 1, {
+                    {
+                        text = _("Next chapter"),
+                        enabled = next_count and true or false,
+                        callback = function()
+                            UIManager:close(button_dialog)
+                            local next_url = doc:getNextChapterUrl()
+                            local count = doc._next_chapter_count
+                            local username = doc.username
+                            local password = doc.password
+                            UIManager:nextTick(function()
+                                self.ui:onClose()
+                                local OPDSPSE = require("opdspse")
+                                OPDSPSE:streamPages(next_url, count, false, username, password)
+                            end)
+                        end,
+                    },
+                })
+            end
         end
         button_dialog = ButtonDialog:new{
             name = "end_document",

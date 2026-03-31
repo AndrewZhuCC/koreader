@@ -539,10 +539,18 @@ function OPDSPSEDocument:getOrDownloadPageData(pageno)
         return data
     else
         logger.dbg("OPDSPSEDocument: Request failed:", status or code)
-        -- Server returned non-200: this page doesn't exist.
-        -- Shrink page count so KOReader knows the real end of document.
-        if pageno > 1 and pageno <= self.count then
+        -- Only shrink page count on definitive 404 (page truly doesn't exist).
+        -- Timeouts, network errors, and transient failures (code is nil or
+        -- not a number) must NOT shrink the count — the page may still exist
+        -- and the user can retry by flipping back and forth.
+        if code == 404 and pageno > 1 and pageno <= self.count then
             self:adjustPageCount(pageno - 1)
+        else
+            -- Invalidate the tile cache so the placeholder image won't be
+            -- permanently cached in DocCache.  Next time the user navigates
+            -- to this page, renderPage will discard the stale tile and call
+            -- openPage again, which re-triggers the HTTP download.
+            self:resetTileCacheValidity()
         end
         return nil
     end
