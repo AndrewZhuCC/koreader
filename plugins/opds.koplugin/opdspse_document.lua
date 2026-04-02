@@ -1,7 +1,9 @@
 local Document = require("document/document")
+local DocCache = require("document/doccache")
 local DrawContext = require("ffi/drawcontext")
 local CanvasContext = require("document/canvascontext")
 local Blitbuffer = require("ffi/blitbuffer")
+local Geom = require("ui/geometry")
 local RenderImage = require("ui/renderimage")
 local logger = require("logger")
 local ltn12 = require("ltn12")
@@ -388,6 +390,27 @@ function OPDSPSEDocument:getPages()
     return self.count
 end
 
+--- Override: only cache dimensions when the real image has been downloaded.
+--- Placeholder images must never pollute the pgdim DocCache or size_cache,
+--- otherwise a later successful retry would still render at the wrong size.
+function OPDSPSEDocument:getNativePageDimensions(pageno)
+    local hash = "pgdim|"..self.file.."|"..self.mod_time.."|"..pageno
+    local cached = DocCache:check(hash)
+    if cached then
+        return cached[1]
+    end
+    local page = self._document:openPage(pageno)
+    local page_size_w, page_size_h = page:getSize(self.dc_null)
+    local page_size = Geom:new{ w = page_size_w, h = page_size_h }
+    -- Only persist to DocCache when we have real image data for this page.
+    if self.page_data_cache[pageno] then
+        local CacheItem = require("cacheitem")
+        DocCache:insert(hash, CacheItem:new{ page_size })
+    end
+    page:close()
+    return page_size
+end
+
 function OPDSPSEDocument:getOriginalPageSize(pageno)
     local cached_size = self.size_cache[pageno]
     if cached_size ~= nil then
@@ -468,16 +491,18 @@ function OPDSPSEDocument:getPageImage(pageno)
         return RenderImage:renderImageFile("resources/koreader.png", false)
     end
 
-    if self.size_cache_count > 10 then
-        for k in pairs(self.size_cache) do
-            self.size_cache[k] = nil
-            self.size_cache_count = self.size_cache_count - 1
-            break
+    -- Only cache the size when we have real image data (not a placeholder).
+    if self.page_data_cache[pageno] then
+        if self.size_cache_count > 10 then
+            for k in pairs(self.size_cache) do
+                self.size_cache[k] = nil
+                self.size_cache_count = self.size_cache_count - 1
+                break
+            end
         end
+        self.size_cache[pageno] = { width = page_bb:getWidth(), height = page_bb:getHeight() }
+        self.size_cache_count = self.size_cache_count + 1
     end
-
-    self.size_cache[pageno] = { width = page_bb:getWidth(), height = page_bb:getHeight() }
-    self.size_cache_count = self.size_cache_count + 1
 
     return page_bb
 end
@@ -552,6 +577,11 @@ function OPDSPSEDocument:getOrDownloadPageData(pageno)
             -- openPage again, which re-triggers the HTTP download.
             self:resetTileCacheValidity()
         end
+        -- Purge any stale dimension caches that may have been written from
+        -- a placeholder image, so a successful retry picks up the real size.
+        self.size_cache[pageno] = nil
+        local pgdim_hash = "pgdim|"..self.file.."|"..self.mod_time.."|"..pageno
+        DocCache.cache:delete(pgdim_hash)
         return nil
     end
 end
