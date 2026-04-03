@@ -344,6 +344,7 @@ function OPDSPSEDocument:init()
     self.cover_image_data = nil
     self._next_chapter_count = nil
     self._next_chapter_probed = false
+    self._page_fail_ts = {}  -- pageno -> os.time() of last failure, prevents rapid retry
 
     self:_readMetadata()
     logger.info("OPDSPSEDocument: Initialized with", self.count, "pages")
@@ -443,21 +444,32 @@ function OPDSPSEDocument:getCoverPageImage()
         return RenderImage:renderImageData(self.cover_image_data, #self.cover_image_data, false)
     end
 
-    local data = self:getOrDownloadPageData(1)
-    if data then
-        self.cover_image_data = data
-        return RenderImage:renderImageData(data, #data, false)
+    -- Try cached page 1 data first (no network).
+    local cached = self.page_data_cache[1]
+    if cached then
+        self.cover_image_data = cached
+        return RenderImage:renderImageData(cached, #cached, false)
     end
+
+    -- Schedule a background download so the cover will be ready next time.
+    local UIManager = require("ui/uimanager")
+    UIManager:nextTick(function()
+        if self.is_open and not self.cover_image_data then
+            local data = self:getOrDownloadPageData(1)
+            if data then
+                self.cover_image_data = data
+            end
+        end
+    end)
     return nil
 end
 
 function OPDSPSEDocument:openPage(pageno)
     local image_data = self:getOrDownloadPageData(pageno)
 
-    if pageno == 1 then
+    -- Opportunistically remember page 1 as cover (no extra download).
+    if pageno == 1 and image_data then
         self.cover_image_data = image_data
-    elseif self.cover_image_data == nil then
-        self.cover_image_data = self:getOrDownloadPageData(1)
     end
 
     local page_bb
@@ -513,6 +525,14 @@ function OPDSPSEDocument:getOrDownloadPageData(pageno)
         return self.page_data_cache[pageno]
     end
 
+    -- Cooldown: skip pages that failed recently (within 30s) to avoid
+    -- hammering the server and blocking the UI on repeated timeouts.
+    local fail_ts = self._page_fail_ts[pageno]
+    if fail_ts and (os.time() - fail_ts) < 30 then
+        logger.dbg("OPDSPSEDocument: Skipping page", pageno, "- failed recently, cooldown active")
+        return nil
+    end
+
     local index = pageno - 1
     local page_url = self.remote_url:gsub("{pageNumber}", tostring(index))
     page_url = page_url:gsub("{maxWidth}", tostring(Screen:getWidth()))
@@ -554,16 +574,24 @@ function OPDSPSEDocument:getOrDownloadPageData(pageno)
 
         -- When approaching the last page, prefetch next-chapter metadata
         -- so the EndOfBook dialog can show the button without delay.
+        -- Run asynchronously to avoid blocking the current page render.
         if self._next_chapter_count == nil
                 and self._next_chapter_probed ~= true
                 and pageno >= self.count - 2 then
-            self:probeNextChapter()
             self._next_chapter_probed = true
+            local UIManager = require("ui/uimanager")
+            UIManager:scheduleIn(0.1, function()
+                if self.is_open then
+                    self:probeNextChapter()
+                end
+            end)
         end
 
         return data
     else
         logger.dbg("OPDSPSEDocument: Request failed:", status or code)
+        -- Record failure time so we don't retry this page immediately.
+        self._page_fail_ts[pageno] = os.time()
         -- Only shrink page count on definitive 404 (page truly doesn't exist).
         -- Timeouts, network errors, and transient failures (code is nil or
         -- not a number) must NOT shrink the count — the page may still exist
@@ -575,6 +603,8 @@ function OPDSPSEDocument:getOrDownloadPageData(pageno)
             -- permanently cached in DocCache.  Next time the user navigates
             -- to this page, renderPage will discard the stale tile and call
             -- openPage again, which re-triggers the HTTP download.
+            -- (The _page_fail_ts cooldown above prevents this from becoming
+            -- an infinite retry loop — the page will be skipped for 30s.)
             self:resetTileCacheValidity()
         end
         -- Purge any stale dimension caches that may have been written from
@@ -603,10 +633,9 @@ end
 
 function OPDSPSEDocument:downloadPage(pageno)
     local data = self:getOrDownloadPageData(pageno)
-    if pageno == 1 then
+    -- Opportunistically remember page 1 as cover (no extra download).
+    if pageno == 1 and data then
         self.cover_image_data = data
-    elseif self.cover_image_data == nil then
-        self.cover_image_data = self:getOrDownloadPageData(1)
     end
     if not data then
         -- If count was just shrunk past this page, the page simply doesn't
@@ -633,6 +662,7 @@ function OPDSPSEDocument:close()
         self.size_cache = {}
         self.size_cache_count = 0
         self.cover_image_data = nil
+        self._page_fail_ts = {}
         if self.file then
             local util = require("util")
             util.removeFile(self.file)
@@ -840,12 +870,27 @@ function OPDSPSEDocument:findAllText(pattern, case_insensitive, nb_context_words
     return self.koptinterface:findAllText(self, pattern, case_insensitive, nb_context_words, max_hits)
 end
 
-function OPDSPSEDocument:renderPage(pageno, rect, zoom, rotation, gamma, hinting)
-    return self.koptinterface:renderPage(self, pageno, rect, zoom, rotation, gamma, hinting)
+function OPDSPSEDocument:hintPage(pageno, zoom, rotation, gamma)
+    -- Override: pre-download the page data asynchronously so the built-in
+    -- hinting (next-page prefetch) doesn't block the UI with a synchronous
+    -- HTTP request.  The actual render into tile cache will happen when the
+    -- user navigates to the page.
+    if pageno <= 0 or pageno > self.count then return end
+    if self.page_data_cache[pageno] then
+        -- Data already cached — let the normal hintPage render the tile.
+        return self.koptinterface:hintPage(self, pageno, zoom, rotation, gamma)
+    end
+    -- Schedule async download; the tile will be rendered on next drawPage.
+    local UIManager = require("ui/uimanager")
+    UIManager:scheduleIn(0.1, function()
+        if self.is_open and not self.page_data_cache[pageno] then
+            self:getOrDownloadPageData(pageno)
+        end
+    end)
 end
 
-function OPDSPSEDocument:hintPage(pageno, zoom, rotation, gamma)
-    return self.koptinterface:hintPage(self, pageno, zoom, rotation, gamma)
+function OPDSPSEDocument:renderPage(pageno, rect, zoom, rotation, gamma, hinting)
+    return self.koptinterface:renderPage(self, pageno, rect, zoom, rotation, gamma, hinting)
 end
 
 function OPDSPSEDocument:drawPage(target, x, y, rect, pageno, zoom, rotation, gamma)
