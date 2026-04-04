@@ -480,6 +480,19 @@ function OPDSPSEDocument:openPage(pageno)
         logger.err("OPDSPSEDocument: Failed to get page image for page", pageno)
         page_bb = RenderImage:renderImageFile("resources/koreader.png", false)
         image_data = nil
+        -- Show retry button only for the currently visible page, and only
+        -- once per page (avoid infinite popup loops from tile re-renders).
+        local UIManager = require("ui/uimanager")
+        UIManager:nextTick(function()
+            if not self.is_open then return end
+            -- Check this is still the page the user is looking at.
+            local ReaderUI = require("apps/reader/readerui")
+            local paging = ReaderUI.instance and ReaderUI.instance.paging
+            if not paging or paging.current_page ~= pageno then return end
+            -- Don't re-show if we already have a retry dialog for this page.
+            if self._retry_dialog and self._retry_dialog_page == pageno then return end
+            self:showRetryDialog(pageno)
+        end)
     end
 
     return OPDSPSEPage:new{
@@ -489,6 +502,84 @@ function OPDSPSEDocument:openPage(pageno)
         height = page_bb and page_bb:getHeight() or 0,
         doc = self,
     }
+end
+
+function OPDSPSEDocument:showRetryDialog(pageno)
+    local UIManager = require("ui/uimanager")
+    local _ = require("gettext")
+
+    -- Dismiss any previous retry dialog.
+    if self._retry_dialog then
+        UIManager:close(self._retry_dialog)
+        self._retry_dialog = nil
+    end
+
+    local ButtonDialog = require("ui/widget/buttondialog")
+    self._retry_dialog_page = pageno
+    self._retry_dialog = ButtonDialog:new{
+        title = _("Page load failed"),
+        title_align = "center",
+        dismissable = true,
+        buttons = {
+            {
+                {
+                    text = _("Retry"),
+                    callback = function()
+                        UIManager:close(self._retry_dialog)
+                        self._retry_dialog = nil
+                        self._retry_dialog_page = nil
+                        self:retryPage(pageno)
+                    end,
+                },
+            },
+        },
+        close_callback = function()
+            self._retry_dialog = nil
+            self._retry_dialog_page = nil
+        end,
+    }
+    UIManager:show(self._retry_dialog)
+end
+
+function OPDSPSEDocument:retryPage(pageno)
+    local UIManager = require("ui/uimanager")
+    local InfoMessage = require("ui/widget/infomessage")
+    local _ = require("gettext")
+    local Event = require("ui/event")
+
+    -- Clear cooldown so the download is actually attempted.
+    self._page_fail_ts[pageno] = nil
+    -- Invalidate tile cache so the render pipeline won't serve the stale placeholder.
+    self:resetTileCacheValidity()
+    -- Purge stale dimension caches.
+    self.size_cache[pageno] = nil
+    local pgdim_hash = "pgdim|"..self.file.."|"..self.mod_time.."|"..pageno
+    DocCache.cache:delete(pgdim_hash)
+
+    -- Show a brief loading message while downloading.
+    local loading = InfoMessage:new{
+        text = _("Loading…"),
+        timeout = 30,
+    }
+    UIManager:show(loading)
+    UIManager:forceRePaint()
+
+    -- Download the page (synchronous HTTP).
+    local data = self:getOrDownloadPageData(pageno)
+
+    UIManager:close(loading)
+
+    if data then
+        -- Trigger a full page redraw.
+        local ReaderUI = require("apps/reader/readerui")
+        if ReaderUI.instance then
+            ReaderUI.instance:handleEvent(Event:new("RedrawCurrentPage"))
+        end
+    else
+        -- Still failed — show retry dialog again, but only once.
+        -- The dialog is dismissable so the user can give up.
+        self:showRetryDialog(pageno)
+    end
 end
 
 function OPDSPSEDocument:getPageImage(pageno)
@@ -657,6 +748,11 @@ end
 function OPDSPSEDocument:close()
     if self.is_open then
         self.is_open = false
+        if self._retry_dialog then
+            local UIManager = require("ui/uimanager")
+            UIManager:close(self._retry_dialog)
+            self._retry_dialog = nil
+        end
         self.page_data_cache = {}
         self.page_data_cache_count = 0
         self.size_cache = {}
