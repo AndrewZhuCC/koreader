@@ -2,9 +2,9 @@ local Document = require("document/document")
 local DocCache = require("document/doccache")
 local DrawContext = require("ffi/drawcontext")
 local CanvasContext = require("document/canvascontext")
-local Blitbuffer = require("ffi/blitbuffer")
 local Geom = require("ui/geometry")
 local RenderImage = require("ui/renderimage")
+local Mupdf = require("ffi/mupdf")
 local logger = require("logger")
 local ltn12 = require("ltn12")
 local http = require("socket.http")
@@ -12,7 +12,6 @@ local socket = require("socket")
 local socketutil = require("socketutil")
 local url = require("socket.url")
 local Screen = require("device").screen
-local KOPTContext = require("ffi/koptcontext")
 
 local OPDSPSEDocument = Document:extend{
     _document = false,
@@ -31,277 +30,22 @@ local OPDSPSEDocument = Document:extend{
     koptinterface = nil,
 }
 
-local OPDSPSEPage = {}
-
-function OPDSPSEPage:extend(o)
-    o = o or {}
-    setmetatable(o, self)
-    self.__index = self
-    return o
-end
-OPDSPSEPage.new = OPDSPSEPage.extend
-
-function OPDSPSEPage:draw(dc, bb, x_offset, y_offset)
-    if not self.image_bb then
-        logger.err("OPDSPSEPage: No image to draw")
-        return
-    end
-
-    x_offset = x_offset or 0
-    y_offset = y_offset or 0
-
-    local target_w = bb:getWidth()
-    local target_h = bb:getHeight()
-    local zoom = dc:getZoom()
-    local src_w = self.image_bb:getWidth()
-    local src_h = self.image_bb:getHeight()
-
-    local scaled_bb
-    if x_offset == 0 and y_offset == 0 then
-        -- Full-page render: scale the whole image to the target BB size.
-        if self.image_data and (target_w ~= src_w or target_h ~= src_h) then
-            scaled_bb = RenderImage:renderImageData(
-                self.image_data, #self.image_data, false, target_w, target_h)
-        end
-        if not scaled_bb then
-            scaled_bb = self.image_bb:scale(target_w, target_h)
-        end
-    else
-        -- Partial render (e.g. panel zoom from drawPagePart):
-        -- x_offset/y_offset are in *zoomed* coordinates.  Map back to
-        -- original image coordinates, crop, then scale up to target size.
-        local crop_x = math.max(0, math.floor(x_offset / zoom))
-        local crop_y = math.max(0, math.floor(y_offset / zoom))
-        local crop_w = math.min(src_w - crop_x, math.ceil(target_w / zoom))
-        local crop_h = math.min(src_h - crop_y, math.ceil(target_h / zoom))
-        if crop_w > 0 and crop_h > 0 then
-            local cropped = self.image_bb:viewport(crop_x, crop_y, crop_w, crop_h)
-            scaled_bb = cropped:scale(target_w, target_h)
-        else
-            scaled_bb = self.image_bb:scale(target_w, target_h)
-        end
-    end
-
-    local gamma = dc:getGamma()
-    if gamma >= 0.0 and gamma ~= 1.0 then
-        self:applyGamma(scaled_bb, gamma)
-    end
-
-    bb:blitFullFrom(scaled_bb, 0, 0)
-    scaled_bb:free()
-end
-
-function OPDSPSEPage:applyGamma(bb, gamma)
-    local ffi = require("ffi")
-    local uint8pt = ffi.typeof("uint8_t*")
-
-    local lut = ffi.new("uint8_t[256]")
-    for i = 0, 255 do
-        local v = math.floor(((i / 255.0) ^ gamma) * 255.0 + 0.5)
-        lut[i] = v < 0 and 0 or (v > 255 and 255 or v)
-    end
-
-    local w, h = bb.w, bb.h
-    local stride = tonumber(bb.stride)
-    local data = ffi.cast(uint8pt, bb.data)
-    local bb_type = bb:getType()
-
-    if bb_type == 5 then -- TYPE_BBRGB32
-        for y = 0, h - 1 do
-            local row = data + y * stride
-            for x = 0, w - 1 do
-                local off = x * 4
-                row[off]     = lut[row[off]]
-                row[off + 1] = lut[row[off + 1]]
-                row[off + 2] = lut[row[off + 2]]
-            end
-        end
-    elseif bb_type == 1 then -- TYPE_BB8
-        for y = 0, h - 1 do
-            local row = data + y * stride
-            for x = 0, w - 1 do
-                row[x] = lut[row[x]]
-            end
-        end
-    elseif bb_type == 4 then -- TYPE_BBRGB24
-        for y = 0, h - 1 do
-            local row = data + y * stride
-            for x = 0, w - 1 do
-                local off = x * 3
-                row[off]     = lut[row[off]]
-                row[off + 1] = lut[row[off + 1]]
-                row[off + 2] = lut[row[off + 2]]
-            end
-        end
-    else
-        logger.warn("OPDSPSEPage:applyGamma: unsupported BB type", bb_type)
-    end
-end
-
-function OPDSPSEPage:getSize(dc)
-    local zoom = dc:getZoom()
-    return self.image_bb:getWidth() * zoom, self.image_bb:getHeight() * zoom
-end
-
-function OPDSPSEPage:getUsedBBox()
-    return 0.01, 0.01, -0.01, -0.01
-end
-
-function OPDSPSEPage:close()
-    if self.image_bb ~= nil then
-        self.image_bb:free()
-        self.image_bb = nil
-    end
-    self.image_data = nil
-end
-
-function OPDSPSEPage:getPagePix(kopt_context)
-    if not self.image_bb then
-        logger.err("OPDSPSEPage: No image for getPagePix")
-        return
-    end
-
-    local bbox = kopt_context.bbox
-    local zoom = kopt_context.zoom
-
-    local img_width = self.image_bb:getWidth()
-    local img_height = self.image_bb:getHeight()
-
-    local crop_x0 = math.max(0, math.floor(bbox.x0))
-    local crop_y0 = math.max(0, math.floor(bbox.y0))
-    local crop_x1 = math.min(img_width, math.ceil(bbox.x1))
-    local crop_y1 = math.min(img_height, math.ceil(bbox.y1))
-
-    local crop_width = crop_x1 - crop_x0
-    local crop_height = crop_y1 - crop_y0
-
-    if crop_width <= 0 or crop_height <= 0 then
-        logger.warn("OPDSPSEPage: Invalid crop dimensions", crop_width, crop_height)
-        crop_x0, crop_y0 = 0, 0
-        crop_width, crop_height = img_width, img_height
-    end
-
-    local final_width = math.max(1, math.floor(crop_width * zoom + 0.5))
-    local final_height = math.max(1, math.floor(crop_height * zoom + 0.5))
-
-    logger.dbg("OPDSPSEPage: getPagePix - bbox:", bbox.x0, bbox.y0, bbox.x1, bbox.y1)
-    logger.dbg("OPDSPSEPage: getPagePix - crop:", crop_x0, crop_y0, crop_width, crop_height)
-    logger.dbg("OPDSPSEPage: getPagePix - final size:", final_width, final_height, "zoom:", zoom)
-
-    -- Crop via a sub-BlitBuffer view (no allocation), then scale
-    local working_bb
-    if crop_x0 > 0 or crop_y0 > 0 or crop_width < img_width or crop_height < img_height then
-        working_bb = self.image_bb:viewport(crop_x0, crop_y0, crop_width, crop_height)
-    else
-        working_bb = self.image_bb
-    end
-
-    local final_bb
-    if final_width ~= working_bb:getWidth() or final_height ~= working_bb:getHeight() then
-        final_bb = working_bb:scale(final_width, final_height)
-    else
-        final_bb = working_bb:copy()
-    end
-
-    KOPTContext.k2pdfopt.bmp_init(kopt_context.src)
-    self:blitbufferToWillusBitmap(final_bb, kopt_context.src)
-
-    kopt_context.page_width = final_bb:getWidth()
-    kopt_context.page_height = final_bb:getHeight()
-
-    final_bb:free()
-
-    logger.dbg("OPDSPSEPage: getPagePix completed - size:", kopt_context.page_width, kopt_context.page_height)
-end
-
-function OPDSPSEPage:blitbufferToWillusBitmap(bb, willusbitmap)
-    local ffi = require("ffi")
-    local uint8pt = ffi.typeof("uint8_t*")
-
-    local width = bb:getWidth()
-    local height = bb:getHeight()
-
-    willusbitmap.width = width
-    willusbitmap.height = height
-
-    if bb:isRGB() then
-        willusbitmap.bpp = 24
-    else
-        willusbitmap.bpp = 8
-    end
-
-    if KOPTContext.k2pdfopt.bmp_alloc(willusbitmap) == 0 then
-        logger.err("OPDSPSEPage: Failed to allocate WILLUSBITMAP memory")
-        return
-    end
-
-    -- Use bmp_bytewidth for the actual row stride (4-byte aligned)
-    local bmp_stride = KOPTContext.k2pdfopt.bmp_bytewidth(willusbitmap)
-    local data_ptr = ffi.cast(uint8pt, willusbitmap.data)
-
-    local bb_stride = tonumber(bb.stride)
-    local bb_data = ffi.cast(uint8pt, bb.data)
-    local bb_type = bb:getType()
-
-    if willusbitmap.bpp == 8 then
-        for i = 0, 255 do
-            willusbitmap.red[i] = i
-            willusbitmap.green[i] = i
-            willusbitmap.blue[i] = i
-        end
-
-        if bb_type == 1 then -- TYPE_BB8: direct memcpy per row
-            for y = 0, height - 1 do
-                ffi.copy(data_ptr + y * bmp_stride, bb_data + y * bb_stride, width)
-            end
-        else
-            for y = 0, height - 1 do
-                local dst_row = data_ptr + y * bmp_stride
-                local src_row = bb_data + y * bb_stride
-                for x = 0, width - 1 do
-                    dst_row[x] = src_row[x]
+--- Wrap a MuPDF page so that closing it also drops the backing MuPDF document.
+local function wrapMupdfPage(mupdf_doc, mupdf_page)
+    -- Proxy: delegate everything to the real MuPDF page, but override close.
+    local wrapper = {}
+    setmetatable(wrapper, {
+        __index = function(_, k)
+            if k == "close" then
+                return function(self)
+                    mupdf_page:close()
+                    mupdf_doc:close()
                 end
             end
-        end
-    else -- bpp == 24
-        if bb_type == 5 then -- TYPE_BBRGB32: R,G,B,A -> B,G,R
-            for y = 0, height - 1 do
-                local dst_row = data_ptr + y * bmp_stride
-                local src_row = bb_data + y * bb_stride
-                for x = 0, width - 1 do
-                    local si = x * 4
-                    local di = x * 3
-                    dst_row[di]     = src_row[si + 2] -- B
-                    dst_row[di + 1] = src_row[si + 1] -- G
-                    dst_row[di + 2] = src_row[si]     -- R
-                end
-            end
-        elseif bb_type == 4 then -- TYPE_BBRGB24: R,G,B -> B,G,R
-            for y = 0, height - 1 do
-                local dst_row = data_ptr + y * bmp_stride
-                local src_row = bb_data + y * bb_stride
-                for x = 0, width - 1 do
-                    local si = x * 3
-                    local di = x * 3
-                    dst_row[di]     = src_row[si + 2] -- B
-                    dst_row[di + 1] = src_row[si + 1] -- G
-                    dst_row[di + 2] = src_row[si]     -- R
-                end
-            end
-        else
-            -- Fallback: use getPixel (slow but correct for any BB type)
-            for y = 0, height - 1 do
-                local dst_row = data_ptr + y * bmp_stride
-                for x = 0, width - 1 do
-                    local pixel = bb:getPixel(x, y)
-                    local di = x * 3
-                    dst_row[di]     = pixel:getB()
-                    dst_row[di + 1] = pixel:getG()
-                    dst_row[di + 2] = pixel:getR()
-                end
-            end
-        end
-    end
+            return mupdf_page[k]
+        end,
+    })
+    return wrapper
 end
 
 function OPDSPSEDocument:init()
@@ -327,6 +71,7 @@ function OPDSPSEDocument:init()
     self.info.has_pages = true
     self.info.configurable = true
     self.info.number_of_pages = self.count
+    self.render_mode = 0
 
     if CanvasContext:hasEinkScreen() then
         if CanvasContext:canHWDither() then
@@ -472,36 +217,65 @@ function OPDSPSEDocument:openPage(pageno)
         self.cover_image_data = image_data
     end
 
-    local page_bb
     if image_data then
-        page_bb = RenderImage:renderImageData(image_data, #image_data, false)
-    end
-    if not page_bb then
-        logger.err("OPDSPSEDocument: Failed to get page image for page", pageno)
-        page_bb = RenderImage:renderImageFile("resources/koreader.png", false)
-        image_data = nil
-        -- Show retry button only for the currently visible page, and only
-        -- once per page (avoid infinite popup loops from tile re-renders).
-        local UIManager = require("ui/uimanager")
-        UIManager:nextTick(function()
-            if not self.is_open then return end
-            -- Check this is still the page the user is looking at.
-            local ReaderUI = require("apps/reader/readerui")
-            local paging = ReaderUI.instance and ReaderUI.instance.paging
-            if not paging or paging.current_page ~= pageno then return end
-            -- Don't re-show if we already have a retry dialog for this page.
-            if self._retry_dialog and self._retry_dialog_page == pageno then return end
-            self:showRetryDialog(pageno)
-        end)
+        -- Use MuPDF to open the image data as a single-page document.
+        -- This gives us native C implementations of draw, getPagePix, getSize,
+        -- identical to what CBZ uses, for better cropping and rendering quality.
+        local ok, mupdf_doc = pcall(Mupdf.openDocumentFromText, image_data, "image/jpeg")
+        if ok and mupdf_doc then
+            mupdf_doc.color = self.render_color
+            local ok2, mupdf_page = pcall(mupdf_doc.openPage, mupdf_doc, 1)
+            if ok2 and mupdf_page then
+                return wrapMupdfPage(mupdf_doc, mupdf_page)
+            end
+            mupdf_doc:close()
+        end
+        -- Fallback: if MuPDF can't handle this image format, use RenderImage.
+        logger.warn("OPDSPSEDocument: MuPDF failed for page", pageno, "- falling back to RenderImage")
     end
 
-    return OPDSPSEPage:new{
-        image_bb = page_bb,
-        image_data = image_data,
-        width = page_bb and page_bb:getWidth() or 0,
-        height = page_bb and page_bb:getHeight() or 0,
-        doc = self,
+    -- Download failed or MuPDF fallback failed — show placeholder.
+    logger.err("OPDSPSEDocument: Failed to get page image for page", pageno)
+    local placeholder_bb = RenderImage:renderImageFile("resources/koreader.png", false)
+    -- Wrap placeholder as a minimal MuPDF-compatible page via pic module.
+    local pic_page = {
+        image_bb = placeholder_bb,
     }
+    -- Provide the methods koptinterface expects.
+    function pic_page:getSize(dc)
+        local zoom = dc:getZoom()
+        return self.image_bb:getWidth() * zoom, self.image_bb:getHeight() * zoom
+    end
+    function pic_page:draw(dc, bb)
+        local scaled_bb = self.image_bb:scale(bb:getWidth(), bb:getHeight())
+        bb:blitFullFrom(scaled_bb, 0, 0)
+        scaled_bb:free()
+    end
+    function pic_page:getUsedBBox()
+        return 0.01, 0.01, -0.01, -0.01
+    end
+    function pic_page:getPagePix()
+        -- No-op for placeholder pages.
+    end
+    function pic_page:close()
+        if self.image_bb then
+            self.image_bb:free()
+            self.image_bb = nil
+        end
+    end
+
+    -- Show retry button only for the currently visible page.
+    local UIManager = require("ui/uimanager")
+    UIManager:nextTick(function()
+        if not self.is_open then return end
+        local ReaderUI = require("apps/reader/readerui")
+        local paging = ReaderUI.instance and ReaderUI.instance.paging
+        if not paging or paging.current_page ~= pageno then return end
+        if self._retry_dialog and self._retry_dialog_page == pageno then return end
+        self:showRetryDialog(pageno)
+    end)
+
+    return pic_page
 end
 
 function OPDSPSEDocument:showRetryDialog(pageno)
